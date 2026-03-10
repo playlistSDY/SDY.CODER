@@ -269,15 +269,15 @@ function buildStatusBlock(
 ) {
   const lines = ['[status]'];
 
-  const shouldShowQueueWait =
-    typeof queuePositionAtEnqueue === 'number' ||
-    (typeof queueWaitMs === 'number' && queueWaitMs > 0);
+  const shouldShowQueueWait = typeof queueWaitMs === 'number' && queueWaitMs > 0;
 
   if (shouldShowQueueWait) {
     const wait = typeof queueWaitMs === 'number' ? formatDurationWithSeconds(queueWaitMs) : 'N/A';
-    const position =
-      typeof queuePositionAtEnqueue === 'number' ? `#${queuePositionAtEnqueue}` : 'N/A';
-    lines.push(`Queue wait: ${wait} / position ${position}`);
+    if (typeof queuePositionAtEnqueue === 'number') {
+      lines.push(`Queue wait: ${wait} / position #${queuePositionAtEnqueue}`);
+    } else {
+      lines.push(`Queue wait: ${wait}`);
+    }
   }
 
   lines.push(
@@ -348,6 +348,13 @@ export default function App() {
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
+  const [editorStatus, setEditorStatus] = useState({
+    lineCount: 0,
+    lineNumber: 1,
+    column: 1,
+    selectedChars: 0,
+    isFocused: false
+  });
   const [sidePaneWidth, setSidePaneWidth] = useState(() => loadSidePaneWidth());
   const [sidePaneHeight, setSidePaneHeight] = useState(() => loadSidePaneHeight());
   const [panelRatios, setPanelRatios] = useState(DEFAULT_PANEL_RATIOS);
@@ -435,6 +442,22 @@ export default function App() {
     editorRef.current = editor;
     monacoRef.current = monaco;
 
+    const updateEditorStatus = () => {
+      const model = editor.getModel();
+      const position = editor.getPosition();
+      const selection = editor.getSelection();
+      const selectedChars =
+        model && selection ? model.getValueLengthInRange(selection) : 0;
+
+      setEditorStatus({
+        lineCount: model ? model.getLineCount() : 0,
+        lineNumber: position?.lineNumber || 1,
+        column: position?.column || 1,
+        selectedChars,
+        isFocused: editor.hasTextFocus()
+      });
+    };
+
     defineDarkModernTheme(monaco);
     monaco.editor.setTheme('vscode-dark-modern');
 
@@ -449,6 +472,17 @@ export default function App() {
       );
       const storageDisposable = model.onDidChangeContent(() => {
         saveLastCode(langItem.id, model.getValue());
+        if (editor.getModel() === model) {
+          const position = editor.getPosition();
+          const selection = editor.getSelection();
+          setEditorStatus({
+            lineCount: model.getLineCount(),
+            lineNumber: position?.lineNumber || 1,
+            column: position?.column || 1,
+            selectedChars: selection ? model.getValueLengthInRange(selection) : 0,
+            isFocused: editor.hasTextFocus()
+          });
+        }
       });
       modelStorageDisposablesRef.current.push(storageDisposable);
       modelsRef.current.set(langItem.id, model);
@@ -456,6 +490,12 @@ export default function App() {
 
     const initialModel = modelsRef.current.get(language);
     editor.setModel(initialModel);
+    updateEditorStatus();
+    modelStorageDisposablesRef.current.push(editor.onDidChangeCursorPosition(updateEditorStatus));
+    modelStorageDisposablesRef.current.push(editor.onDidChangeCursorSelection(updateEditorStatus));
+    modelStorageDisposablesRef.current.push(editor.onDidFocusEditorText(updateEditorStatus));
+    modelStorageDisposablesRef.current.push(editor.onDidBlurEditorText(updateEditorStatus));
+    modelStorageDisposablesRef.current.push(editor.onDidChangeModel(updateEditorStatus));
     bootLspForLanguage(language);
   };
 
@@ -470,6 +510,13 @@ export default function App() {
     const model = modelsRef.current.get(language);
     if (model && editor.getModel() !== model) {
       editor.setModel(model);
+      setEditorStatus((prev) => ({
+        ...prev,
+        lineCount: model.getLineCount(),
+        lineNumber: 1,
+        column: 1,
+        selectedChars: 0
+      }));
       bootLspForLanguage(language);
     }
   }, [language]);
@@ -768,11 +815,19 @@ export default function App() {
       );
     };
 
+    const formatQueueLogLine = (queueWaitMs, queuePositionAtEnqueue = null) => {
+      const waitLabel = typeof queueWaitMs === 'number' ? `${queueWaitMs.toFixed(0)} ms` : 'N/A';
+      if (typeof queuePositionAtEnqueue === 'number') {
+        return `  queue waiting... ${waitLabel} (#${queuePositionAtEnqueue})`;
+      }
+      return `  queue waiting... ${waitLabel}`;
+    };
+
     try {
       setRunning(true);
       refreshProgressOutput();
       appendLog(`run requested (${language})`);
-      queueLogId = appendLogWithId('  queue waiting... 0 ms (N/A)');
+      queueLogId = appendLogWithId('  queue waiting... 0 ms');
       openingLogId = appendLogWithId('  opening container... 0 ms');
       if (isCompiledLanguage) {
         compileLogId = appendLogWithId('  compile time... 0 ms');
@@ -789,13 +844,9 @@ export default function App() {
           updateLogById(runLogId, `  code execution time... ${progress.executionMs.toFixed(0)} ms`);
         }
         if (queueLogId && progress.queueWaitMs !== null) {
-          const queuePositionLabel =
-            typeof progress.queuePositionAtEnqueue === 'number'
-              ? `#${progress.queuePositionAtEnqueue}`
-              : 'N/A';
           updateLogById(
             queueLogId,
-            `  queue waiting... ${progress.queueWaitMs.toFixed(0)} ms (${queuePositionLabel})`
+            formatQueueLogLine(progress.queueWaitMs, progress.phase === 'queue' ? progress.queuePositionAtEnqueue : null)
           );
         }
         refreshProgressOutput();
@@ -858,15 +909,9 @@ export default function App() {
           progress.openStartedAt = performance.now();
           progress.openMs = 0;
           if (queueLogId && progress.queueWaitMs !== null) {
-            const queuePositionLabel =
-              typeof progress.queuePositionAtEnqueue === 'number'
-                ? `#${progress.queuePositionAtEnqueue}`
-                : 'N/A';
-            updateLogById(
-              queueLogId,
-              `  queue waiting... ${progress.queueWaitMs.toFixed(3)} ms (${queuePositionLabel})`
-            );
+            updateLogById(queueLogId, `  queue waiting... ${progress.queueWaitMs.toFixed(3)} ms`);
           }
+          progress.queuePositionAtEnqueue = null;
           refreshProgressOutput();
           return;
         }
@@ -999,11 +1044,7 @@ export default function App() {
       );
       if (queueLogId) {
         const queueWaitMs = typeof finalResult.queueWaitMs === 'number' ? finalResult.queueWaitMs : 0;
-        const queuePositionLabel =
-          typeof finalResult.queuePositionAtEnqueue === 'number'
-            ? `#${finalResult.queuePositionAtEnqueue}`
-            : 'N/A';
-        updateLogById(queueLogId, `  queue waiting... ${queueWaitMs.toFixed(3)} ms (${queuePositionLabel})`);
+        updateLogById(queueLogId, `  queue waiting... ${queueWaitMs.toFixed(3)} ms`);
       }
       if (compileLogId && typeof finalResult.compileMs === 'number') {
         updateLogById(compileLogId, `  compile time... ${finalResult.compileMs.toFixed(3)} ms`);
@@ -1022,7 +1063,7 @@ export default function App() {
           finalResult.sandboxMemoryPeakBytes,
           finalResult.sandboxMemoryLimitBytes,
           finalResult.queueWaitMs,
-          finalResult.queuePositionAtEnqueue
+          null
         );
 
         const failureOutput = [
@@ -1047,7 +1088,7 @@ export default function App() {
         finalResult.sandboxMemoryPeakBytes,
         finalResult.sandboxMemoryLimitBytes,
         finalResult.queueWaitMs,
-        finalResult.queuePositionAtEnqueue
+        null
       );
 
       const next = [
@@ -1150,6 +1191,12 @@ export default function App() {
     return chunks;
   };
 
+  const editorStatusLabel = editorStatus.isFocused
+    ? `Ln ${editorStatus.lineNumber}, Col ${editorStatus.column}${
+        editorStatus.selectedChars > 0 ? ` (${editorStatus.selectedChars} selected)` : ''
+      }`
+    : `Lines ${editorStatus.lineCount}`;
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1188,24 +1235,29 @@ export default function App() {
         }}
       >
         <section className="editor-pane">
-          <Editor
-            height="100%"
-            defaultLanguage="python"
-            defaultValue={LANGUAGES[0].starter}
-            theme="vscode-dark-modern"
-            onMount={onEditorMount}
-            options={{
-              minimap: { enabled: false },
-              'semanticHighlighting.enabled': true,
-              fontSize: 14,
-              fontLigatures: true,
-              smoothScrolling: true,
-              automaticLayout: true,
-              tabSize: 4,
-              insertSpaces: true,
-              lineNumbersMinChars: 3
-            }}
-          />
+          <div className="editor-surface">
+            <Editor
+              height="100%"
+              defaultLanguage="python"
+              defaultValue={LANGUAGES[0].starter}
+              theme="vscode-dark-modern"
+              onMount={onEditorMount}
+              options={{
+                minimap: { enabled: false },
+                'semanticHighlighting.enabled': true,
+                fontSize: 14,
+                fontLigatures: true,
+                smoothScrolling: true,
+                automaticLayout: true,
+                tabSize: 4,
+                insertSpaces: true,
+                lineNumbersMinChars: 3
+              }}
+            />
+          </div>
+          <div className="editor-statusbar">
+            <span>{editorStatusLabel}</span>
+          </div>
         </section>
 
         <div

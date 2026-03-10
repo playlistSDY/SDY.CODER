@@ -104,12 +104,32 @@ body,
 }
 
 .editor-pane {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
+}
+
+.editor-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.editor-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 28px;
+  padding: 0 12px;
+  border-top: 1px solid #2a2a2a;
+  background: linear-gradient(180deg, #1c1c1c 0%, #171717 100%);
+  color: #d4d4d4;
+  font-size: 12px;
+  font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
 }
 
 .workspace-resizer {
