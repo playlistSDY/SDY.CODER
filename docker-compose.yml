@@ -7,7 +7,7 @@ services:
     container_name: web-vscode-backend
     environment:
       PORT: "3001"
-      RUN_TIMEOUT_MS: "8000"
+      RUN_TIMEOUT_MS: "30000"
       SANDBOX_PROVIDER: "docker"
       SANDBOX_IMAGE: "web-vscode-backend:latest"
       SANDBOX_CPU_LIMIT: "1.0"

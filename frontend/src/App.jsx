@@ -85,6 +85,7 @@ const FILE_NAME_BY_LANG = {
   java: 'Main.java',
   csharp: 'Main.cs'
 };
+const COMPILED_LANGUAGES = new Set(['c', 'cpp', 'java', 'csharp', 'go', 'kotlin']);
 const LSP_WORKSPACE_URI = 'file:///tmp/web-vscode-workspace';
 const DEFAULT_LANGUAGE = LANGUAGES[0].id;
 const LAST_LANGUAGE_STORAGE_KEY = 'web-vscode:last-language';
@@ -236,6 +237,27 @@ function formatDurationWithSeconds(ms) {
     return 'N/A';
   }
   return `${ms.toFixed(3)} ms (${(ms / 1000).toFixed(3)} s)`;
+}
+
+function buildStatusBlock(containerOpenMs, compileMs, executionMs) {
+  const lines = [
+    '[status]',
+    Number.isFinite(containerOpenMs)
+      ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
+      : 'Opening container: N/A'
+  ];
+
+  if (typeof compileMs === 'number') {
+    lines.push(`Compile time: ${formatDurationWithSeconds(compileMs)}`);
+  }
+
+  lines.push(
+    typeof executionMs === 'number'
+      ? `Code execution time: ${formatDurationWithSeconds(executionMs)}`
+      : 'Code execution time: N/A'
+  );
+
+  return lines.join('\n');
 }
 
 function defineDarkModernTheme(monaco) {
@@ -639,10 +661,19 @@ export default function App() {
     let openingTimer = null;
     let openingLogId = null;
     const runStartedAt = performance.now();
+    const isCompiledLanguage = COMPILED_LANGUAGES.has(language);
+    const OPENING_STAGE_MS = 1200;
+    const EXEC_STAGE_MS = 400;
 
     try {
       setRunning(true);
-      setOutput('Opening container... 0 ms');
+      if (isCompiledLanguage) {
+        setOutput(
+          '[status]\nOpening container: 0 ms\nCompile time: 0 ms\nCode execution time: 0 ms'
+        );
+      } else {
+        setOutput('Opening container... 0 ms');
+      }
       appendLog(`run requested (${language})`);
       openingLogId = appendLogWithId('  opening container... 0 ms');
 
@@ -650,10 +681,27 @@ export default function App() {
         const elapsedMs = performance.now() - runStartedAt;
         const line = `  opening container... ${elapsedMs.toFixed(0)} ms`;
         updateLogById(openingLogId, line);
+
+        if (isCompiledLanguage) {
+          const openingMs = Math.min(elapsedMs, OPENING_STAGE_MS);
+          const compileMs = Math.max(0, elapsedMs - OPENING_STAGE_MS);
+          const runningMs = Math.max(0, elapsedMs - OPENING_STAGE_MS - EXEC_STAGE_MS);
+          setOutput(
+            [
+              '[status]',
+              `Opening container: ${openingMs.toFixed(0)} ms`,
+              `Compile time: ${compileMs.toFixed(0)} ms`,
+              `Code execution time: ${runningMs.toFixed(0)} ms`
+            ].join('\n')
+          );
+          return;
+        }
+
         if (elapsedMs >= 1200) {
           setOutput(`Opening container... ${elapsedMs.toFixed(0)} ms\nCode execution in progress...`);
           return;
         }
+
         setOutput(`Opening container... ${elapsedMs.toFixed(0)} ms`);
       }, 80);
 
@@ -687,15 +735,7 @@ export default function App() {
         result.logs.forEach((line) => appendLog(line));
       }
       if (!response.ok) {
-        const statusBlock = [
-          '[status]',
-          Number.isFinite(containerOpenMs)
-            ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
-            : 'Opening container: N/A',
-          typeof result.executionMs === 'number'
-            ? `Code execution time: ${formatDurationWithSeconds(result.executionMs)}`
-            : 'Code execution time: N/A'
-        ].join('\n');
+        const statusBlock = buildStatusBlock(containerOpenMs, result.compileMs, result.executionMs);
 
         const failureOutput = [
           statusBlock,
@@ -714,15 +754,7 @@ export default function App() {
         appendLog(`  code execution finished: ${result.executionMs.toFixed(3)} ms`);
       }
 
-      const statusBlock = [
-        '[status]',
-        Number.isFinite(containerOpenMs)
-          ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
-          : 'Opening container: N/A',
-        typeof result.executionMs === 'number'
-          ? `Code execution time: ${formatDurationWithSeconds(result.executionMs)}`
-          : 'Code execution time: N/A'
-      ].join('\n');
+      const statusBlock = buildStatusBlock(containerOpenMs, result.compileMs, result.executionMs);
 
       const next = [
         statusBlock,

@@ -14,7 +14,7 @@ app.use(express.json({ limit: '1mb' }));
 
 const BACKEND_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.PORT || 3001);
-const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 8000);
+const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 30000);
 const LSP_WORKSPACE_DIR = path.join(os.tmpdir(), 'web-vscode-workspace');
 const DOCKER_SOCKET_PATH = '/var/run/docker.sock';
 
@@ -31,6 +31,7 @@ const JAVA_DEFAULT_CLASSPATH =
 const COMPILE_ERROR_EXIT_CODE = 42;
 const EXEC_TIME_MARKER = '__WEB_EXEC_NS__=';
 const OPEN_TIME_MARKER = '__WEB_OPEN_NS__=';
+const COMPILE_TIME_MARKER = '__WEB_COMPILE_NS__=';
 const RUNTIME_INFO_TTL_MS = Number(process.env.RUNTIME_INFO_TTL_MS || 10 * 60 * 1000);
 const runtimeInfoCache = new Map();
 
@@ -100,8 +101,8 @@ const DOCKER_RUN_SPEC = {
   },
   kotlin: {
     sourceFile: 'Main.kt',
-    compileCommand: 'kotlinc Main.kt -include-runtime -d main.jar && [ -f main.jar ]',
-    runCommand: 'java -jar main.jar',
+    compileCommand: 'kotlinc Main.kt -d main.jar && [ -f main.jar ]',
+    runCommand: 'java -cp "main.jar:/opt/kotlinc/lib/*" MainKt',
     hasCompileStep: true
   },
   dart: {
@@ -132,14 +133,20 @@ function buildDockerSandboxCommand(language) {
   }
 
   const compilePart = spec.compileCommand
-    ? `(${spec.compileCommand} || exit ${COMPILE_ERROR_EXIT_CODE}); `
+    ? `__compile_start_ns=$(date +%s%N); \
+(${spec.compileCommand}); \
+__compile_status=$?; \
+__compile_end_ns=$(date +%s%N); \
+echo "${COMPILE_TIME_MARKER}$((__compile_end_ns - __compile_start_ns))" >&2; \
+[ $__compile_status -eq 0 ] || exit ${COMPILE_ERROR_EXIT_CODE}; `
     : '';
 
   return `__boot_ns=$(date +%s%N); \
 printf '%s' "$CODE_B64" | base64 -d > ${spec.sourceFile} \
 && printf '%s' "$STDIN_B64" | base64 -d > .stdin \
-&& ${compilePart}__start_ns=$(date +%s%N); \
-echo "${OPEN_TIME_MARKER}$((__start_ns - __boot_ns))" >&2; \
+&& __opened_ns=$(date +%s%N); \
+echo "${OPEN_TIME_MARKER}$((__opened_ns - __boot_ns))" >&2; \
+${compilePart}__start_ns=$(date +%s%N); \
 (${spec.runCommand} < .stdin); \
 __status=$?; \
 __end_ns=$(date +%s%N); \
@@ -150,6 +157,7 @@ exit $__status`;
 function stripExecutionMarker(stdout = '', stderr = '') {
   let executionNs = null;
   let openNs = null;
+  let compileNs = null;
 
   const strip = (text) => {
     const lines = text.split('\n');
@@ -165,6 +173,11 @@ function stripExecutionMarker(stdout = '', stderr = '') {
         openNs = Number(openMatch[1]);
         continue;
       }
+      const compileMatch = line.match(new RegExp(`^${COMPILE_TIME_MARKER}(\\d+)$`));
+      if (compileMatch) {
+        compileNs = Number(compileMatch[1]);
+        continue;
+      }
       kept.push(line);
     }
     return kept.join('\n');
@@ -177,6 +190,8 @@ function stripExecutionMarker(stdout = '', stderr = '') {
       executionNs === null || Number.isNaN(executionNs)
         ? null
         : Number((executionNs / 1_000_000).toFixed(3)),
+    compileMs:
+      compileNs === null || Number.isNaN(compileNs) ? null : Number((compileNs / 1_000_000).toFixed(3)),
     containerOpenMs:
       openNs === null || Number.isNaN(openNs) ? null : Number((openNs / 1_000_000).toFixed(3))
   };
@@ -264,6 +279,19 @@ async function persistDocument(uri, text) {
 }
 
 async function ensureLspWorkspaceScaffold(language) {
+  if (language === 'go') {
+    const goModPath = path.join(LSP_WORKSPACE_DIR, 'go.mod');
+    await writeFile(
+      goModPath,
+      `module playground
+
+go 1.24
+`,
+      'utf8'
+    );
+    return;
+  }
+
   if (language !== 'csharp') {
     return;
   }
@@ -608,6 +636,18 @@ async function getRuntimeInfo(language) {
   }
 }
 
+function getRuntimeInfoFromCache(language) {
+  const cacheKey = `${SANDBOX_PROVIDER}:${language}`;
+  const cached = runtimeInfoCache.get(cacheKey);
+  if (!cached) {
+    return null;
+  }
+  if (Date.now() - cached.updatedAt >= RUNTIME_INFO_TTL_MS) {
+    return null;
+  }
+  return cached.value;
+}
+
 function forceRemoveDockerContainer(containerName) {
   try {
     spawnSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
@@ -623,7 +663,8 @@ async function runInDockerSandbox(language, code, stdinText = '') {
   }
   const shellCommand = buildDockerSandboxCommand(language);
   const logs = [];
-  const runtimeInfo = await getRuntimeInfo(language);
+  const runtimeInfo = getRuntimeInfoFromCache(language);
+  void getRuntimeInfo(language);
 
   const containerName = `web-run-${randomUUID().slice(0, 8)}`;
   logs.push('  sandbox container created');
@@ -690,12 +731,16 @@ async function runInDockerSandbox(language, code, stdinText = '') {
   if (typeof cleaned.executionMs === 'number') {
     logs.push(`  code execution time: ${(cleaned.executionMs / 1000).toFixed(6)} s`);
   }
+  if (typeof cleaned.compileMs === 'number') {
+    logs.push(`  compile time: ${(cleaned.compileMs / 1000).toFixed(6)} s`);
+  }
 
   return {
     ...result,
     stdout: cleaned.stdout,
     stderr: cleaned.stderr,
     executionMs: cleaned.executionMs,
+    compileMs: cleaned.compileMs,
     containerOpenMs: cleaned.containerOpenMs,
     logs,
     compileError: spec.hasCompileStep && result.code === COMPILE_ERROR_EXIT_CODE
@@ -705,7 +750,8 @@ async function runInDockerSandbox(language, code, stdinText = '') {
 async function runCodeLocally(language, code, stdinText = '') {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'web-compiler-'));
   const logs = ['  running code locally (fallback mode)'];
-  const runtimeInfo = await getRuntimeInfo(language);
+  const runtimeInfo = getRuntimeInfoFromCache(language);
+  void getRuntimeInfo(language);
   if (runtimeInfo) {
     logs.push(`  runtime: ${runtimeInfo}`);
   }
@@ -718,51 +764,57 @@ async function runCodeLocally(language, code, stdinText = '') {
       const result = await runCommand('python3', ['main.py'], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...result, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'c') {
       await writeFile(path.join(tempDir, 'main.c'), code, 'utf8');
       logs.push('  compiling source code');
+      const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('gcc', ['main.c', '-std=c11', '-O2', '-o', 'main'], {
         cwd: tempDir
       });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
       const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'cpp') {
       await writeFile(path.join(tempDir, 'main.cpp'), code, 'utf8');
       logs.push('  compiling source code');
+      const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('g++', ['main.cpp', '-std=c++17', '-O2', '-o', 'main'], {
         cwd: tempDir
       });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
       const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'java') {
       await writeFile(path.join(tempDir, 'Main.java'), code, 'utf8');
       logs.push('  compiling source code');
+      const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('javac', ['-cp', JAVA_DEFAULT_CLASSPATH, 'Main.java'], {
         cwd: tempDir
       });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
@@ -772,22 +824,24 @@ async function runCodeLocally(language, code, stdinText = '') {
       });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'csharp') {
       await writeFile(path.join(tempDir, 'Main.cs'), code, 'utf8');
       logs.push('  compiling source code');
+      const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('mcs', ['-out:Main.exe', 'Main.cs'], { cwd: tempDir });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
       const run = await runCommand('mono', ['Main.exe'], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'nodejs') {
@@ -797,43 +851,46 @@ async function runCodeLocally(language, code, stdinText = '') {
       const result = await runCommand('node', ['main.js'], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...result, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'go') {
       await writeFile(path.join(tempDir, 'main.go'), code, 'utf8');
       logs.push('  compiling source code');
+      const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('go', ['build', '-o', 'main', 'main.go'], {
         cwd: tempDir
       });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
       const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'kotlin') {
       await writeFile(path.join(tempDir, 'Main.kt'), code, 'utf8');
       logs.push('  compiling source code');
-      const compile = await runCommand(
-        'kotlinc',
-        ['Main.kt', '-include-runtime', '-d', 'main.jar'],
-        { cwd: tempDir }
-      );
+      const compileStartedAt = process.hrtime.bigint();
+      const compile = await runCommand('kotlinc', ['Main.kt', '-d', 'main.jar'], { cwd: tempDir });
+      const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       if (compile.code !== 0 || !existsSync(path.join(tempDir, 'main.jar'))) {
-        return { ...compile, executionMs: null, logs, compileError: true };
+        return { ...compile, executionMs: null, compileMs, logs, compileError: true };
       }
       logs.push('  running code');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand('java', ['-jar', 'main.jar'], { cwd: tempDir, input: stdinText });
+      const run = await runCommand('java', ['-cp', 'main.jar:/opt/kotlinc/lib/*', 'MainKt'], {
+        cwd: tempDir,
+        input: stdinText
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
     }
 
     if (language === 'dart') {
@@ -843,7 +900,7 @@ async function runCodeLocally(language, code, stdinText = '') {
       const run = await runCommand('dart', ['run', 'main.dart'], { cwd: tempDir, input: stdinText });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, containerOpenMs: null, logs, compileError: false };
+      return { ...run, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
     }
 
     throw new Error(`Unsupported language: ${language}`);
@@ -892,6 +949,7 @@ app.post('/api/run', async (req, res) => {
         stdout: result.stdout,
         stderr: result.stderr || 'Compilation failed',
         executionMs: null,
+        compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
         containerOpenMs:
           typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
         logs: result.logs || []
@@ -903,6 +961,7 @@ app.post('/api/run', async (req, res) => {
       stdout: result.stdout,
       stderr: result.timedOut ? `${result.stderr}\nExecution timed out` : result.stderr,
       executionMs: typeof result.executionMs === 'number' ? result.executionMs : null,
+      compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
       logs: result.logs || []
     });
