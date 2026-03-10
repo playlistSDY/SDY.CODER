@@ -121,6 +121,10 @@ function isLowSignalRawLogLine(rawLine) {
     return true;
   }
 
+  if (/BadLocationException/i.test(line)) {
+    return true;
+  }
+
   if (/^\d{1,2}:\d{2}:\d{2}\.\d+\s+info:/i.test(line)) {
     return true;
   }
@@ -264,6 +268,10 @@ function simplifyLspServerMessage(raw, language) {
   }
 
   if (/^WARNING:\s+package\s+.+\s+not in java\.desktop$/i.test(line)) {
+    return null;
+  }
+
+  if (/BadLocationException/i.test(line)) {
     return null;
   }
 
