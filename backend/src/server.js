@@ -23,7 +23,7 @@ const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE || 'web-vscode-backend:latest';
 const SANDBOX_CPU_LIMIT = process.env.SANDBOX_CPU_LIMIT || '1.0';
 const SANDBOX_MEMORY_LIMIT = process.env.SANDBOX_MEMORY_LIMIT || '512m';
 const SANDBOX_PIDS_LIMIT = Number(process.env.SANDBOX_PIDS_LIMIT || 128);
-const SANDBOX_MAX_CONTAINERS = Number(process.env.SANDBOX_MAX_CONTAINERS || 2);
+const SANDBOX_MAX_CONTAINERS = Number(process.env.SANDBOX_MAX_CONTAINERS || 20);
 const SANDBOX_WORKSPACE_SIZE = process.env.SANDBOX_WORKSPACE_SIZE || '256m';
 const SANDBOX_TMP_SIZE = process.env.SANDBOX_TMP_SIZE || '128m';
 const SANDBOX_USER = process.env.SANDBOX_USER || '65534:65534';
@@ -41,6 +41,14 @@ const runtimeInfoCache = new Map();
 let sandboxActiveContainers = 0;
 let sandboxQueueSeq = 0;
 const sandboxWaitQueue = [];
+const activeRunControls = new Map();
+
+class RunCancelledError extends Error {
+  constructor(message = 'Execution cancelled by user') {
+    super(message);
+    this.name = 'RunCancelledError';
+  }
+}
 
 function parseMemoryLimitToBytes(raw) {
   if (!raw) {
@@ -67,6 +75,40 @@ function parseMemoryLimitToBytes(raw) {
             ? 1024 ** 4
             : 1;
   return Math.round(value * scale);
+}
+
+function createRunControl() {
+  const abortHandlers = new Set();
+  return {
+    aborted: false,
+    abortReason: null,
+    abort(reason = 'Execution cancelled by user') {
+      if (this.aborted) {
+        return;
+      }
+      this.aborted = true;
+      this.abortReason = reason;
+      for (const fn of abortHandlers) {
+        try {
+          fn(reason);
+        } catch {
+          // Ignore abort handler failures.
+        }
+      }
+      abortHandlers.clear();
+    },
+    onAbort(fn) {
+      if (typeof fn !== 'function') {
+        return () => {};
+      }
+      if (this.aborted) {
+        fn(this.abortReason || 'Execution cancelled by user');
+        return () => {};
+      }
+      abortHandlers.add(fn);
+      return () => abortHandlers.delete(fn);
+    }
+  };
 }
 
 function notifySandboxQueuePositions() {
@@ -99,9 +141,13 @@ function tryGrantSandboxQueue() {
   notifySandboxQueuePositions();
 }
 
-function acquireSandboxSlot({ onQueueEvent = null } = {}) {
+function acquireSandboxSlot({ onQueueEvent = null, runControl = null } = {}) {
   if (SANDBOX_PROVIDER !== 'docker') {
     return Promise.resolve({ queueWaitMs: 0, queuePositionAtEnqueue: null });
+  }
+
+  if (runControl?.aborted) {
+    return Promise.reject(new RunCancelledError(runControl.abortReason || 'Execution cancelled by user'));
   }
 
   if (sandboxActiveContainers < SANDBOX_MAX_CONTAINERS) {
@@ -109,20 +155,39 @@ function acquireSandboxSlot({ onQueueEvent = null } = {}) {
     return Promise.resolve({ queueWaitMs: 0, queuePositionAtEnqueue: null });
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const queuePositionAtEnqueue = sandboxWaitQueue.length + 1;
     const entry = {
       id: ++sandboxQueueSeq,
       enqueuedAt: Date.now(),
       queuePositionAtEnqueue,
       onQueueEvent,
-      resolve
+      resolve,
+      reject
     };
     sandboxWaitQueue.push(entry);
+    let unsubscribe = () => {};
+    const resolveWithCleanup = (value) => {
+      unsubscribe();
+      resolve(value);
+    };
+    entry.resolve = resolveWithCleanup;
     if (typeof onQueueEvent === 'function') {
       onQueueEvent({ phase: 'queue_wait_start', position: queuePositionAtEnqueue });
     }
     notifySandboxQueuePositions();
+
+    if (runControl) {
+      unsubscribe = runControl.onAbort(() => {
+        const idx = sandboxWaitQueue.findIndex((item) => item.id === entry.id);
+        if (idx !== -1) {
+          sandboxWaitQueue.splice(idx, 1);
+          notifySandboxQueuePositions();
+          reject(new RunCancelledError(runControl.abortReason || 'Execution cancelled by user'));
+        }
+        unsubscribe();
+      });
+    }
   });
 }
 
@@ -134,8 +199,8 @@ function releaseSandboxSlot() {
   tryGrantSandboxQueue();
 }
 
-async function runWithSandboxQueue(runFn, { onQueueEvent = null } = {}) {
-  const slot = await acquireSandboxSlot({ onQueueEvent });
+async function runWithSandboxQueue(runFn, { onQueueEvent = null, runControl = null } = {}) {
+  const slot = await acquireSandboxSlot({ onQueueEvent, runControl });
   let released = false;
   const release = () => {
     if (released) {
@@ -661,15 +726,23 @@ function runCommand(
     input = null,
     onTimeout = null,
     onStdoutChunk = null,
-    onStderrChunk = null
+    onStderrChunk = null,
+    runControl = null
   } = {}
 ) {
   return new Promise((resolve, reject) => {
+    if (runControl?.aborted) {
+      reject(new RunCancelledError(runControl.abortReason || 'Execution cancelled by user'));
+      return;
+    }
+
     const child = spawn(command, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let cancelled = false;
+    let abortUnsubscribe = null;
 
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -697,13 +770,30 @@ function runCommand(
 
     child.on('error', (error) => {
       clearTimeout(timeout);
+      if (abortUnsubscribe) {
+        abortUnsubscribe();
+      }
       reject(error);
     });
 
     child.on('close', (code) => {
       clearTimeout(timeout);
+      if (abortUnsubscribe) {
+        abortUnsubscribe();
+      }
+      if (cancelled || runControl?.aborted) {
+        reject(new RunCancelledError(runControl?.abortReason || 'Execution cancelled by user'));
+        return;
+      }
       resolve({ stdout, stderr, code, timedOut });
     });
+
+    if (runControl) {
+      abortUnsubscribe = runControl.onAbort(() => {
+        cancelled = true;
+        child.kill('SIGKILL');
+      });
+    }
 
     if (typeof input === 'string') {
       child.stdin.write(input);
@@ -845,7 +935,7 @@ function forceRemoveDockerContainer(containerName) {
 }
 
 async function runInDockerSandbox(language, code, stdinText = '', options = {}) {
-  const { onPhase = null } = options;
+  const { onPhase = null, runControl = null } = options;
   const spec = DOCKER_RUN_SPEC[language];
   if (!spec) {
     throw new Error(`Unsupported language for docker sandbox: ${language}`);
@@ -856,6 +946,10 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   void getRuntimeInfo(language);
 
   const containerName = `web-run-${randomUUID().slice(0, 8)}`;
+  const unsubscribeAbort =
+    runControl && SANDBOX_PROVIDER === 'docker'
+      ? runControl.onAbort(() => forceRemoveDockerContainer(containerName))
+      : null;
   logs.push('  sandbox container created');
   if (runtimeInfo) {
     logs.push(`  runtime: ${runtimeInfo}`);
@@ -928,10 +1022,18 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     }
   };
 
-  const result = await runCommand('docker', args, {
-    onTimeout: () => forceRemoveDockerContainer(containerName),
-    onStderrChunk: parsePhaseChunks
-  });
+  let result;
+  try {
+    result = await runCommand('docker', args, {
+      onTimeout: () => forceRemoveDockerContainer(containerName),
+      onStderrChunk: parsePhaseChunks,
+      runControl
+    });
+  } finally {
+    if (unsubscribeAbort) {
+      unsubscribeAbort();
+    }
+  }
 
   if (phaseBuffer) {
     const parsed = parsePhaseMarker(phaseBuffer.replace(/\r$/, ''));
@@ -978,7 +1080,7 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
 }
 
 async function runCodeLocally(language, code, stdinText = '', options = {}) {
-  const { onPhase = null } = options;
+  const { onPhase = null, runControl = null } = options;
   const emitPhase = (phase, extra = {}) => {
     if (typeof onPhase === 'function') {
       onPhase({ phase, ...extra });
@@ -1000,7 +1102,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const result = await runCommand('python3', ['main.py'], { cwd: tempDir, input: stdinText });
+      const result = await runCommand('python3', ['main.py'], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1013,7 +1119,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('gcc', ['main.c', '-std=c11', '-O2', '-o', 'main'], {
-        cwd: tempDir
+        cwd: tempDir,
+        runControl
       });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
@@ -1023,7 +1130,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
+      const run = await runCommand(path.join(tempDir, 'main'), [], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1047,7 +1158,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('g++', ['main.cpp', '-std=c++17', '-O2', '-o', 'main'], {
-        cwd: tempDir
+        cwd: tempDir,
+        runControl
       });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
@@ -1057,7 +1169,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
+      const run = await runCommand(path.join(tempDir, 'main'), [], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1081,7 +1197,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('javac', ['-cp', JAVA_DEFAULT_CLASSPATH, 'Main.java'], {
-        cwd: tempDir
+        cwd: tempDir,
+        runControl
       });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
@@ -1093,7 +1210,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const startedAt = process.hrtime.bigint();
       const run = await runCommand('java', ['-cp', `.:${JAVA_DEFAULT_CLASSPATH}`, 'Main'], {
         cwd: tempDir,
-        input: stdinText
+        input: stdinText,
+        runControl
       });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
@@ -1117,7 +1235,10 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  compiling source code');
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
-      const compile = await runCommand('mcs', ['-out:Main.exe', 'Main.cs'], { cwd: tempDir });
+      const compile = await runCommand('mcs', ['-out:Main.exe', 'Main.cs'], {
+        cwd: tempDir,
+        runControl
+      });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
       if (compile.code !== 0) {
@@ -1126,7 +1247,7 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand('mono', ['Main.exe'], { cwd: tempDir, input: stdinText });
+      const run = await runCommand('mono', ['Main.exe'], { cwd: tempDir, input: stdinText, runControl });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1149,7 +1270,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const result = await runCommand('node', ['main.js'], { cwd: tempDir, input: stdinText });
+      const result = await runCommand('node', ['main.js'], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1173,7 +1298,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
       const compile = await runCommand('go', ['build', '-o', 'main', 'main.go'], {
-        cwd: tempDir
+        cwd: tempDir,
+        runControl
       });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
@@ -1183,7 +1309,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand(path.join(tempDir, 'main'), [], { cwd: tempDir, input: stdinText });
+      const run = await runCommand(path.join(tempDir, 'main'), [], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1206,7 +1336,10 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  compiling source code');
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
-      const compile = await runCommand('kotlinc', ['Main.kt', '-d', 'main.jar'], { cwd: tempDir });
+      const compile = await runCommand('kotlinc', ['Main.kt', '-d', 'main.jar'], {
+        cwd: tempDir,
+        runControl
+      });
       const compileMs = Number((Number(process.hrtime.bigint() - compileStartedAt) / 1_000_000).toFixed(3));
       emitPhase('compile_end', { ms: compileMs });
       if (compile.code !== 0 || !existsSync(path.join(tempDir, 'main.jar'))) {
@@ -1217,7 +1350,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const startedAt = process.hrtime.bigint();
       const run = await runCommand('java', ['-cp', 'main.jar:/opt/kotlinc/lib/*', 'MainKt'], {
         cwd: tempDir,
-        input: stdinText
+        input: stdinText,
+        runControl
       });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
@@ -1241,7 +1375,11 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand('dart', ['run', 'main.dart'], { cwd: tempDir, input: stdinText });
+      const run = await runCommand('dart', ['run', 'main.dart'], {
+        cwd: tempDir,
+        input: stdinText,
+        runControl
+      });
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
@@ -1401,7 +1539,7 @@ app.post('/api/run', async (req, res) => {
 });
 
 app.post('/api/run/stream', async (req, res) => {
-  const { language, code, stdin = '' } = req.body ?? {};
+  const { language, code, stdin = '', runId: requestedRunId } = req.body ?? {};
   if (!language || !code) {
     res.status(400).json({ error: 'language and code are required' });
     return;
@@ -1430,6 +1568,13 @@ app.post('/api/run/stream', async (req, res) => {
     res.write(`${JSON.stringify({ event, ...payload })}\n`);
   };
 
+  const runId = typeof requestedRunId === 'string' && requestedRunId.trim()
+    ? requestedRunId.trim()
+    : randomUUID();
+  const runControl = createRunControl();
+  activeRunControls.set(runId, runControl);
+  sendEvent('run', { runId });
+
   try {
     let result;
     const onPhase = (payload) => sendEvent('phase', payload);
@@ -1444,11 +1589,11 @@ app.post('/api/run/stream', async (req, res) => {
         return;
       }
       result = await runWithSandboxQueue(
-        () => runInDockerSandbox(language, code, stdin, { onPhase }),
-        { onQueueEvent: onPhase }
+        () => runInDockerSandbox(language, code, stdin, { onPhase, runControl }),
+        { onQueueEvent: onPhase, runControl }
       );
     } else {
-      result = await runCodeLocally(language, code, stdin, { onPhase });
+      result = await runCodeLocally(language, code, stdin, { onPhase, runControl });
     }
 
     if (typeof result.queueWaitMs === 'number' && result.queueWaitMs > 0) {
@@ -1503,10 +1648,32 @@ app.post('/api/run/stream', async (req, res) => {
       logs: result.logs || []
     });
   } catch (error) {
+    if (error instanceof RunCancelledError) {
+      sendEvent('final', { ok: false, cancelled: true, error: 'Execution stopped by user' });
+      return;
+    }
     sendEvent('final', { ok: false, error: error.message || 'Execution error' });
   } finally {
+    activeRunControls.delete(runId);
     res.end();
   }
+});
+
+app.post('/api/run/cancel', (req, res) => {
+  const { runId } = req.body ?? {};
+  if (!runId || typeof runId !== 'string') {
+    res.status(400).json({ ok: false, error: 'runId is required' });
+    return;
+  }
+
+  const runControl = activeRunControls.get(runId);
+  if (!runControl) {
+    res.json({ ok: true, cancelled: false, reason: 'run_not_found_or_already_finished' });
+    return;
+  }
+
+  runControl.abort('Execution stopped by user');
+  res.json({ ok: true, cancelled: true });
 });
 
 const server = http.createServer(app);

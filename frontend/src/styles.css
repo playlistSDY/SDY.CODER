@@ -78,8 +78,16 @@ body,
   cursor: pointer;
 }
 
+.run-btn.stop-btn {
+  background: #b4232d;
+}
+
 .run-btn:hover:enabled {
   background: var(--accent-hover);
+}
+
+.run-btn.stop-btn:hover {
+  background: #d62d3b;
 }
 
 .run-btn:disabled {

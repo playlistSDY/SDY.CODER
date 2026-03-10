@@ -362,6 +362,9 @@ export default function App() {
   const resizeDragRef = useRef(null);
   const logsBodyRef = useRef(null);
   const logCounterRef = useRef(0);
+  const currentRunIdRef = useRef(null);
+  const currentRunAbortRef = useRef(null);
+  const stopRequestedRef = useRef(false);
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -712,6 +715,11 @@ export default function App() {
     let runLogId = null;
     let queueLogId = null;
     const runStartedAt = performance.now();
+    const runId = typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `run-${Date.now()}`;
+    const runAbortController = new AbortController();
+    currentRunIdRef.current = runId;
+    currentRunAbortRef.current = runAbortController;
+    stopRequestedRef.current = false;
     const isCompiledLanguage = COMPILED_LANGUAGES.has(language);
     const progress = {
       phase: 'opening',
@@ -792,7 +800,9 @@ export default function App() {
       const response = await fetch('/api/run/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: runAbortController.signal,
         body: JSON.stringify({
+          runId,
           language,
           stdin: stdinText,
           code:
@@ -938,6 +948,11 @@ export default function App() {
             continue;
           }
 
+          if (eventPayload.event === 'run' && typeof eventPayload.runId === 'string') {
+            currentRunIdRef.current = eventPayload.runId;
+            continue;
+          }
+
           if (eventPayload.event === 'final') {
             finalResult = eventPayload;
           }
@@ -949,6 +964,8 @@ export default function App() {
           const eventPayload = JSON.parse(buffer.trim());
           if (eventPayload.event === 'phase') {
             applyPhase(eventPayload.phase, eventPayload.ms, eventPayload);
+          } else if (eventPayload.event === 'run' && typeof eventPayload.runId === 'string') {
+            currentRunIdRef.current = eventPayload.runId;
           } else if (eventPayload.event === 'final') {
             finalResult = eventPayload;
           }
@@ -1039,13 +1056,45 @@ export default function App() {
 
       setOutput(next || 'No output');
     } catch (error) {
-      setOutput(error.message || 'Network error');
-      appendLog(`run failed: ${error.message || 'network error'}`);
+      const isAbort = error?.name === 'AbortError';
+      if (isAbort || stopRequestedRef.current) {
+        const stopMsg = 'Execution stopped by user';
+        setOutput(`[status]\n${stopMsg}`);
+        appendLog('run stopped by user');
+      } else {
+        setOutput(error.message || 'Network error');
+        appendLog(`run failed: ${error.message || 'network error'}`);
+      }
     } finally {
       if (openingTimer) {
         window.clearInterval(openingTimer);
       }
+      currentRunIdRef.current = null;
+      currentRunAbortRef.current = null;
+      stopRequestedRef.current = false;
       setRunning(false);
+    }
+  };
+
+  const stopRun = async () => {
+    if (!running) {
+      return;
+    }
+    stopRequestedRef.current = true;
+    const runId = currentRunIdRef.current;
+    if (runId) {
+      try {
+        await fetch('/api/run/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId })
+        });
+      } catch {
+        // Ignore cancel request errors and still abort local stream.
+      }
+    }
+    if (currentRunAbortRef.current) {
+      currentRunAbortRef.current.abort();
     }
   };
 
@@ -1116,8 +1165,12 @@ export default function App() {
               </option>
             ))}
           </select>
-          <button type="button" className="run-btn" onClick={runCode} disabled={running}>
-            {running ? 'Running...' : 'Run'}
+          <button
+            type="button"
+            className={`run-btn${running ? ' stop-btn' : ''}`}
+            onClick={running ? stopRun : runCode}
+          >
+            {running ? 'Stop' : 'Run'}
           </button>
         </div>
       </header>
