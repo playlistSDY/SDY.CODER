@@ -1267,7 +1267,7 @@ export default function App() {
           </select>
           <button
             type="button"
-            className="control-btn secondary-btn"
+            className="control-btn danger-btn"
             onClick={openResetModal}
             disabled={running}
           >
