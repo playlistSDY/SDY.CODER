@@ -32,9 +32,38 @@ const COMPILE_ERROR_EXIT_CODE = 42;
 const EXEC_TIME_MARKER = '__WEB_EXEC_NS__=';
 const OPEN_TIME_MARKER = '__WEB_OPEN_NS__=';
 const COMPILE_TIME_MARKER = '__WEB_COMPILE_NS__=';
+const SANDBOX_CPU_MARKER = '__WEB_SANDBOX_CPU_MILLI_PCT__=';
+const SANDBOX_MEM_PEAK_MARKER = '__WEB_SANDBOX_MEM_PEAK_BYTES__=';
 const PHASE_MARKER = '__WEB_PHASE__=';
 const RUNTIME_INFO_TTL_MS = Number(process.env.RUNTIME_INFO_TTL_MS || 10 * 60 * 1000);
 const runtimeInfoCache = new Map();
+
+function parseMemoryLimitToBytes(raw) {
+  if (!raw) {
+    return null;
+  }
+  const text = String(raw).trim().toLowerCase();
+  const match = text.match(/^(\d+(?:\.\d+)?)([kmgt]?)(b)?$/);
+  if (!match) {
+    return null;
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const unit = match[2] || '';
+  const scale =
+    unit === 'k'
+      ? 1024
+      : unit === 'm'
+        ? 1024 ** 2
+        : unit === 'g'
+          ? 1024 ** 3
+          : unit === 't'
+            ? 1024 ** 4
+            : 1;
+  return Math.round(value * scale);
+}
 
 const LSP_CANDIDATES = {
   python: [
@@ -152,11 +181,18 @@ echo "${OPEN_TIME_MARKER}$((__opened_ns - __boot_ns))" >&2; \
 echo "${PHASE_MARKER}open_done:$((__opened_ns - __boot_ns))" >&2; \
 ${compilePart}__start_ns=$(date +%s%N); \
 echo "${PHASE_MARKER}run_start" >&2; \
+__cpu_start_us=$(awk '/usage_usec/ {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0); \
 (${spec.runCommand} < .stdin); \
 __status=$?; \
 __end_ns=$(date +%s%N); \
+__cpu_end_us=$(awk '/usage_usec/ {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0); \
+__wall_us=$(((__end_ns - __opened_ns) / 1000)); \
+if [ "$__wall_us" -gt 0 ]; then __cpu_milli_pct=$(( (__cpu_end_us - __cpu_start_us) * 100000 / __wall_us )); else __cpu_milli_pct=0; fi; \
+__mem_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory.max_usage_in_bytes 2>/dev/null || echo 0); \
 echo "${EXEC_TIME_MARKER}$((__end_ns - __start_ns))" >&2; \
 echo "${PHASE_MARKER}run_end:$((__end_ns - __start_ns))" >&2; \
+echo "${SANDBOX_CPU_MARKER}\${__cpu_milli_pct}" >&2; \
+echo "${SANDBOX_MEM_PEAK_MARKER}\${__mem_peak_bytes}" >&2; \
 exit $__status`;
 }
 
@@ -164,6 +200,8 @@ function stripExecutionMarker(stdout = '', stderr = '') {
   let executionNs = null;
   let openNs = null;
   let compileNs = null;
+  let sandboxCpuMilliPct = null;
+  let sandboxMemPeakBytes = null;
 
   const strip = (text) => {
     const lines = text.split('\n');
@@ -184,6 +222,16 @@ function stripExecutionMarker(stdout = '', stderr = '') {
         compileNs = Number(compileMatch[1]);
         continue;
       }
+      const cpuMatch = line.match(new RegExp(`^${SANDBOX_CPU_MARKER}(-?\\d+)$`));
+      if (cpuMatch) {
+        sandboxCpuMilliPct = Number(cpuMatch[1]);
+        continue;
+      }
+      const memMatch = line.match(new RegExp(`^${SANDBOX_MEM_PEAK_MARKER}(\\d+)$`));
+      if (memMatch) {
+        sandboxMemPeakBytes = Number(memMatch[1]);
+        continue;
+      }
       if (line.startsWith(PHASE_MARKER)) {
         continue;
       }
@@ -201,6 +249,12 @@ function stripExecutionMarker(stdout = '', stderr = '') {
         : Number((executionNs / 1_000_000).toFixed(3)),
     compileMs:
       compileNs === null || Number.isNaN(compileNs) ? null : Number((compileNs / 1_000_000).toFixed(3)),
+    sandboxCpuPercent:
+      sandboxCpuMilliPct === null || Number.isNaN(sandboxCpuMilliPct)
+        ? null
+        : Number((sandboxCpuMilliPct / 1000).toFixed(3)),
+    sandboxMemoryPeakBytes:
+      sandboxMemPeakBytes === null || Number.isNaN(sandboxMemPeakBytes) ? null : sandboxMemPeakBytes,
     containerOpenMs:
       openNs === null || Number.isNaN(openNs) ? null : Number((openNs / 1_000_000).toFixed(3))
   };
@@ -808,6 +862,12 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   if (typeof cleaned.compileMs === 'number') {
     logs.push(`  compile time: ${(cleaned.compileMs / 1000).toFixed(6)} s`);
   }
+  if (typeof cleaned.sandboxCpuPercent === 'number') {
+    logs.push(`  sandbox cpu usage: ${cleaned.sandboxCpuPercent.toFixed(3)} %`);
+  }
+  if (typeof cleaned.sandboxMemoryPeakBytes === 'number') {
+    logs.push(`  sandbox memory peak: ${cleaned.sandboxMemoryPeakBytes} bytes`);
+  }
 
   return {
     ...result,
@@ -815,6 +875,10 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     stderr: cleaned.stderr,
     executionMs: cleaned.executionMs,
     compileMs: cleaned.compileMs,
+    sandboxCpuPercent: cleaned.sandboxCpuPercent,
+    sandboxMemoryPeakBytes: cleaned.sandboxMemoryPeakBytes,
+    sandboxCpuLimit: Number(SANDBOX_CPU_LIMIT),
+    sandboxMemoryLimitBytes: parseMemoryLimitToBytes(SANDBOX_MEMORY_LIMIT),
     containerOpenMs: cleaned.containerOpenMs,
     logs,
     compileError: spec.hasCompileStep && result.code === COMPILE_ERROR_EXIT_CODE
@@ -871,7 +935,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'cpp') {
@@ -894,7 +969,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'java') {
@@ -920,7 +1006,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'csharp') {
@@ -941,7 +1038,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'nodejs') {
@@ -953,7 +1061,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...result,
+        executionMs,
+        compileMs: null,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'go') {
@@ -976,7 +1095,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'kotlin') {
@@ -1000,7 +1130,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     if (language === 'dart') {
@@ -1012,7 +1153,18 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...run, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
+      return {
+        ...run,
+        executionMs,
+        compileMs: null,
+        sandboxCpuPercent: null,
+        sandboxMemoryPeakBytes: null,
+        sandboxCpuLimit: null,
+        sandboxMemoryLimitBytes: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false
+      };
     }
 
     throw new Error(`Unsupported language: ${language}`);
@@ -1062,6 +1214,13 @@ app.post('/api/run', async (req, res) => {
         stderr: result.stderr || 'Compilation failed',
         executionMs: null,
         compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
+        sandboxCpuPercent:
+          typeof result.sandboxCpuPercent === 'number' ? result.sandboxCpuPercent : null,
+        sandboxMemoryPeakBytes:
+          typeof result.sandboxMemoryPeakBytes === 'number' ? result.sandboxMemoryPeakBytes : null,
+        sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
+        sandboxMemoryLimitBytes:
+          typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
         containerOpenMs:
           typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
         logs: result.logs || []
@@ -1074,6 +1233,13 @@ app.post('/api/run', async (req, res) => {
       stderr: result.timedOut ? `${result.stderr}\nExecution timed out` : result.stderr,
       executionMs: typeof result.executionMs === 'number' ? result.executionMs : null,
       compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
+      sandboxCpuPercent:
+        typeof result.sandboxCpuPercent === 'number' ? result.sandboxCpuPercent : null,
+      sandboxMemoryPeakBytes:
+        typeof result.sandboxMemoryPeakBytes === 'number' ? result.sandboxMemoryPeakBytes : null,
+      sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
+      sandboxMemoryLimitBytes:
+        typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
       logs: result.logs || []
     });
@@ -1137,6 +1303,13 @@ app.post('/api/run/stream', async (req, res) => {
         stderr: result.stderr || 'Compilation failed',
         executionMs: null,
         compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
+        sandboxCpuPercent:
+          typeof result.sandboxCpuPercent === 'number' ? result.sandboxCpuPercent : null,
+        sandboxMemoryPeakBytes:
+          typeof result.sandboxMemoryPeakBytes === 'number' ? result.sandboxMemoryPeakBytes : null,
+        sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
+        sandboxMemoryLimitBytes:
+          typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
         containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
         logs: result.logs || []
       });
@@ -1150,6 +1323,13 @@ app.post('/api/run/stream', async (req, res) => {
       stderr: result.timedOut ? `${result.stderr}\nExecution timed out` : result.stderr,
       executionMs: typeof result.executionMs === 'number' ? result.executionMs : null,
       compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
+      sandboxCpuPercent:
+        typeof result.sandboxCpuPercent === 'number' ? result.sandboxCpuPercent : null,
+      sandboxMemoryPeakBytes:
+        typeof result.sandboxMemoryPeakBytes === 'number' ? result.sandboxMemoryPeakBytes : null,
+      sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
+      sandboxMemoryLimitBytes:
+        typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
       logs: result.logs || []
     });

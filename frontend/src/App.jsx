@@ -239,7 +239,32 @@ function formatDurationWithSeconds(ms) {
   return `${ms.toFixed(3)} ms (${(ms / 1000).toFixed(3)} s)`;
 }
 
-function buildStatusBlock(containerOpenMs, compileMs, executionMs) {
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+    return 'N/A';
+  }
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let idx = -1;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value.toFixed(2)} ${units[idx]}`;
+}
+
+function buildStatusBlock(
+  containerOpenMs,
+  compileMs,
+  executionMs,
+  sandboxCpuPercent = null,
+  sandboxCpuLimit = null,
+  sandboxMemoryPeakBytes = null,
+  sandboxMemoryLimitBytes = null
+) {
   const lines = [
     '[status]',
     Number.isFinite(containerOpenMs)
@@ -256,6 +281,19 @@ function buildStatusBlock(containerOpenMs, compileMs, executionMs) {
       ? `Code execution time: ${formatDurationWithSeconds(executionMs)}`
       : 'Code execution time: N/A'
   );
+
+  if (typeof sandboxCpuPercent === 'number' || typeof sandboxCpuLimit === 'number') {
+    const usage =
+      typeof sandboxCpuPercent === 'number' ? `${sandboxCpuPercent.toFixed(3)} %` : 'N/A';
+    const limit = typeof sandboxCpuLimit === 'number' ? `${sandboxCpuLimit} vCPU` : 'N/A';
+    lines.push(`CPU usage: ${usage} / max ${limit}`);
+  }
+
+  if (typeof sandboxMemoryPeakBytes === 'number' || typeof sandboxMemoryLimitBytes === 'number') {
+    lines.push(
+      `Memory peak: ${formatBytes(sandboxMemoryPeakBytes)} / max ${formatBytes(sandboxMemoryLimitBytes)}`
+    );
+  }
 
   return lines.join('\n');
 }
@@ -863,7 +901,11 @@ export default function App() {
         const statusBlock = buildStatusBlock(
           containerOpenMs,
           finalResult.compileMs,
-          finalResult.executionMs
+          finalResult.executionMs,
+          finalResult.sandboxCpuPercent,
+          finalResult.sandboxCpuLimit,
+          finalResult.sandboxMemoryPeakBytes,
+          finalResult.sandboxMemoryLimitBytes
         );
 
         const failureOutput = [
@@ -882,7 +924,11 @@ export default function App() {
       const statusBlock = buildStatusBlock(
         containerOpenMs,
         finalResult.compileMs,
-        finalResult.executionMs
+        finalResult.executionMs,
+        finalResult.sandboxCpuPercent,
+        finalResult.sandboxCpuLimit,
+        finalResult.sandboxMemoryPeakBytes,
+        finalResult.sandboxMemoryLimitBytes
       );
 
       const next = [
