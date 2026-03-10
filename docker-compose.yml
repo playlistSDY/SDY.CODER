@@ -1,0 +1,33 @@
+services:
+  backend:
+    image: web-vscode-backend:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: web-vscode-backend
+    environment:
+      PORT: "3001"
+      RUN_TIMEOUT_MS: "8000"
+      SANDBOX_PROVIDER: "docker"
+      SANDBOX_IMAGE: "web-vscode-backend:latest"
+      SANDBOX_CPU_LIMIT: "1.0"
+      SANDBOX_MEMORY_LIMIT: "512m"
+      SANDBOX_PIDS_LIMIT: "128"
+      JAVA_DEFAULT_CLASSPATH: "/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar"
+    expose:
+      - "3001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  frontend:
+    image: web-vscode-frontend:latest
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: web-vscode-frontend
+    depends_on:
+      - backend
+    ports:
+      - "5403:80"
+    restart: unless-stopped
