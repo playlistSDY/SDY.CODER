@@ -660,52 +660,57 @@ export default function App() {
   const runCode = async () => {
     let openingTimer = null;
     let openingLogId = null;
+    let compileLogId = null;
+    let runLogId = null;
     const runStartedAt = performance.now();
     const isCompiledLanguage = COMPILED_LANGUAGES.has(language);
-    const OPENING_STAGE_MS = 1200;
-    const EXEC_STAGE_MS = 400;
+    const progress = {
+      phase: 'opening',
+      phaseStartedAt: runStartedAt,
+      openMs: 0,
+      compileMs: isCompiledLanguage ? 0 : null,
+      executionMs: 0,
+      openFrozen: false,
+      compileFrozen: false,
+      executionFrozen: false
+    };
+    let finalResult = null;
+
+    const refreshProgressOutput = () => {
+      const now = performance.now();
+      if (progress.phase === 'opening' && !progress.openFrozen) {
+        progress.openMs = Number((now - runStartedAt).toFixed(3));
+      } else if (progress.phase === 'compile' && !progress.compileFrozen) {
+        progress.compileMs = Number((now - progress.phaseStartedAt).toFixed(3));
+      } else if (progress.phase === 'run' && !progress.executionFrozen) {
+        progress.executionMs = Number((now - progress.phaseStartedAt).toFixed(3));
+      }
+      setOutput(buildStatusBlock(progress.openMs, progress.compileMs, progress.executionMs));
+    };
 
     try {
       setRunning(true);
-      if (isCompiledLanguage) {
-        setOutput(
-          '[status]\nOpening container: 0 ms\nCompile time: 0 ms\nCode execution time: 0 ms'
-        );
-      } else {
-        setOutput('Opening container... 0 ms');
-      }
+      refreshProgressOutput();
       appendLog(`run requested (${language})`);
       openingLogId = appendLogWithId('  opening container... 0 ms');
+      if (isCompiledLanguage) {
+        compileLogId = appendLogWithId('  compile time... 0 ms');
+      }
+      runLogId = appendLogWithId('  code execution time... 0 ms');
 
       openingTimer = window.setInterval(() => {
-        const elapsedMs = performance.now() - runStartedAt;
-        const line = `  opening container... ${elapsedMs.toFixed(0)} ms`;
+        const line = `  opening container... ${progress.openMs.toFixed(0)} ms`;
         updateLogById(openingLogId, line);
-
-        if (isCompiledLanguage) {
-          const openingMs = Math.min(elapsedMs, OPENING_STAGE_MS);
-          const compileMs = Math.max(0, elapsedMs - OPENING_STAGE_MS);
-          const runningMs = Math.max(0, elapsedMs - OPENING_STAGE_MS - EXEC_STAGE_MS);
-          setOutput(
-            [
-              '[status]',
-              `Opening container: ${openingMs.toFixed(0)} ms`,
-              `Compile time: ${compileMs.toFixed(0)} ms`,
-              `Code execution time: ${runningMs.toFixed(0)} ms`
-            ].join('\n')
-          );
-          return;
+        if (compileLogId) {
+          updateLogById(compileLogId, `  compile time... ${progress.compileMs?.toFixed(0) || 0} ms`);
         }
-
-        if (elapsedMs >= 1200) {
-          setOutput(`Opening container... ${elapsedMs.toFixed(0)} ms\nCode execution in progress...`);
-          return;
+        if (runLogId) {
+          updateLogById(runLogId, `  code execution time... ${progress.executionMs.toFixed(0)} ms`);
         }
-
-        setOutput(`Opening container... ${elapsedMs.toFixed(0)} ms`);
+        refreshProgressOutput();
       }, 80);
 
-      const response = await fetch('/api/run', {
+      const response = await fetch('/api/run/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -718,11 +723,128 @@ export default function App() {
         })
       });
 
-      const result = await response.json();
+      if (!response.ok || !response.body) {
+        const fallbackError = await response.json().catch(() => ({}));
+        throw new Error(fallbackError.error || 'Failed to start streaming run');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const applyPhase = (phase, ms) => {
+        if (phase === 'open_done') {
+          if (typeof ms === 'number') {
+            progress.openMs = ms;
+          }
+          progress.openFrozen = true;
+          progress.phase = isCompiledLanguage ? 'waiting_compile' : 'waiting_run';
+          progress.phaseStartedAt = performance.now();
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'compile_start') {
+          if (progress.compileMs === null) {
+            progress.compileMs = 0;
+          }
+          progress.compileFrozen = false;
+          progress.phase = 'compile';
+          progress.phaseStartedAt = performance.now();
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'compile_end') {
+          if (typeof ms === 'number') {
+            progress.compileMs = ms;
+          }
+          progress.compileFrozen = true;
+          progress.phase = 'waiting_run';
+          progress.phaseStartedAt = performance.now();
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'run_start') {
+          progress.executionFrozen = false;
+          progress.executionMs = 0;
+          progress.phase = 'run';
+          progress.phaseStartedAt = performance.now();
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'run_end') {
+          if (typeof ms === 'number') {
+            progress.executionMs = ms;
+          }
+          progress.executionFrozen = true;
+          refreshProgressOutput();
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+
+        while (true) {
+          const newlineIndex = buffer.indexOf('\n');
+          if (newlineIndex === -1) {
+            break;
+          }
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line) {
+            continue;
+          }
+
+          let eventPayload;
+          try {
+            eventPayload = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          if (eventPayload.event === 'phase') {
+            applyPhase(eventPayload.phase, eventPayload.ms);
+            continue;
+          }
+
+          if (eventPayload.event === 'final') {
+            finalResult = eventPayload;
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        try {
+          const eventPayload = JSON.parse(buffer.trim());
+          if (eventPayload.event === 'phase') {
+            applyPhase(eventPayload.phase, eventPayload.ms);
+          } else if (eventPayload.event === 'final') {
+            finalResult = eventPayload;
+          }
+        } catch {
+          // Ignore trailing parse errors.
+        }
+      }
+
+      if (!finalResult) {
+        throw new Error('Run stream ended without final result');
+      }
+
       const containerOpenMs =
-        typeof result.containerOpenMs === 'number'
-          ? result.containerOpenMs
+        typeof finalResult.containerOpenMs === 'number'
+          ? finalResult.containerOpenMs
           : Number((performance.now() - runStartedAt).toFixed(3));
+
+      if (Array.isArray(finalResult.logs) && finalResult.logs.length > 0) {
+        finalResult.logs.forEach((line) => appendLog(line));
+      }
 
       updateLogById(
         openingLogId,
@@ -730,18 +852,25 @@ export default function App() {
           ? `  opening container... ${containerOpenMs.toFixed(3)} ms`
           : '  opening container... done'
       );
-
-      if (Array.isArray(result.logs) && result.logs.length > 0) {
-        result.logs.forEach((line) => appendLog(line));
+      if (compileLogId && typeof finalResult.compileMs === 'number') {
+        updateLogById(compileLogId, `  compile time... ${finalResult.compileMs.toFixed(3)} ms`);
       }
-      if (!response.ok) {
-        const statusBlock = buildStatusBlock(containerOpenMs, result.compileMs, result.executionMs);
+      if (runLogId && typeof finalResult.executionMs === 'number') {
+        updateLogById(runLogId, `  code execution time... ${finalResult.executionMs.toFixed(3)} ms`);
+      }
+
+      if (!finalResult.ok) {
+        const statusBlock = buildStatusBlock(
+          containerOpenMs,
+          finalResult.compileMs,
+          finalResult.executionMs
+        );
 
         const failureOutput = [
           statusBlock,
-          result.stdout ? `[stdout]\n${result.stdout}` : '',
-          result.stderr ? `[stderr]\n${result.stderr}` : '',
-          result.error ? `[error]\n${result.error}` : ''
+          finalResult.stdout ? `[stdout]\n${finalResult.stdout}` : '',
+          finalResult.stderr ? `[stderr]\n${finalResult.stderr}` : '',
+          finalResult.error ? `[error]\n${finalResult.error}` : ''
         ]
           .filter(Boolean)
           .join('\n\n');
@@ -750,16 +879,16 @@ export default function App() {
         return;
       }
 
-      if (typeof result.executionMs === 'number') {
-        appendLog(`  code execution finished: ${result.executionMs.toFixed(3)} ms`);
-      }
-
-      const statusBlock = buildStatusBlock(containerOpenMs, result.compileMs, result.executionMs);
+      const statusBlock = buildStatusBlock(
+        containerOpenMs,
+        finalResult.compileMs,
+        finalResult.executionMs
+      );
 
       const next = [
         statusBlock,
-        result.stdout ? `[stdout]\n${result.stdout}` : '',
-        result.stderr ? `[stderr]\n${result.stderr}` : ''
+        finalResult.stdout ? `[stdout]\n${finalResult.stdout}` : '',
+        finalResult.stderr ? `[stderr]\n${finalResult.stderr}` : ''
       ]
         .filter(Boolean)
         .join('\n\n');
