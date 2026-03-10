@@ -99,7 +99,7 @@ const WORKSPACE_RESIZER_MIN_SIDE_PX = 280;
 const WORKSPACE_RESIZER_MIN_EDITOR_HEIGHT_PX = 260;
 const WORKSPACE_RESIZER_MIN_SIDE_HEIGHT_PX = 220;
 const RESIZER_HEIGHT_PX = 8;
-const DEFAULT_PANEL_RATIOS = [0.34, 0.33, 0.33];
+const DEFAULT_PANEL_RATIOS = [0.26, 0.46, 0.28];
 const MIN_PANEL_HEIGHT_PX = 96;
 const LEGACY_CSHARP_STARTER =
   `using System;\n\npublic class Main {\n    public static void Main(string[] args) {\n        Console.WriteLine(\"Hello, C#\");\n    }\n}\n`;
