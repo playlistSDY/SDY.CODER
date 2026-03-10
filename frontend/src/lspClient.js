@@ -174,6 +174,33 @@ function isLowSignalRawLogLine(rawLine) {
   return false;
 }
 
+function toMonacoRange(monaco, range) {
+  if (!range?.start || !range?.end) {
+    return undefined;
+  }
+  return {
+    startLineNumber: (range.start.line ?? 0) + 1,
+    startColumn: (range.start.character ?? 0) + 1,
+    endLineNumber: (range.end.line ?? 0) + 1,
+    endColumn: (range.end.character ?? 0) + 1
+  };
+}
+
+function normalizeSnippetInsertText(language, insertText) {
+  if (typeof insertText !== 'string') {
+    return insertText;
+  }
+
+  // clangd often sends human-readable placeholder labels like
+  // `${1:condition}` and `${0:statements}`. VS Code keeps snippet tabstops,
+  // but the visible defaults feel noisy in this UI, so strip the labels for C/C++.
+  if (language === 'c' || language === 'cpp') {
+    return insertText.replace(/\$\{(\d+):[^}]*\}/g, '${$1}');
+  }
+
+  return insertText;
+}
+
 function simplifyLspServerMessage(raw, language) {
   let line = String(raw || '').trim();
   if (!line) {
@@ -278,6 +305,7 @@ export class LSPClient {
     languageId = language,
     model,
     onLog,
+    isActive = () => true,
     workspaceUri = 'file:///tmp/web-vscode-workspace'
   }) {
     this.monaco = monaco;
@@ -285,6 +313,7 @@ export class LSPClient {
     this.languageId = languageId;
     this.model = model;
     this.onLog = onLog;
+    this.isActive = isActive;
     this.workspaceUri = workspaceUri.replace(/\/+$/, '');
 
     this.socket = null;
@@ -293,6 +322,12 @@ export class LSPClient {
     this.docVersion = 1;
     this.disposables = [];
     this.isReady = false;
+    this.providersRegistered = false;
+    this.manuallyStopped = false;
+    this.disconnectHandled = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 3;
+    this.reconnectTimer = null;
     this.lastLogLine = '';
     this.lastLogAt = 0;
     this.semanticTokensEmitter = new this.monaco.Emitter();
@@ -303,58 +338,88 @@ export class LSPClient {
   }
 
   start() {
+    this.manuallyStopped = false;
+    this.connect();
+  }
+
+  connect() {
+    if (!this.isActive()) {
+      return;
+    }
+    this.disconnectHandled = false;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/lsp/${this.language}`;
     this.socket = new WebSocket(wsUrl);
 
     this.socket.onopen = async () => {
+      if (!this.isActive()) {
+        this.manuallyStopped = true;
+        this.socket?.close();
+        return;
+      }
+      this.clearReconnectTimer();
+      this.reconnectAttempts = 0;
       this.log(`${this.language} lsp connected`);
-      const initializeResult = await this.sendRequest('initialize', {
-        processId: null,
-        rootUri: this.workspaceUri,
-        workspaceFolders: [{ uri: this.workspaceUri, name: 'workspace' }],
-        capabilities: {
-          textDocument: {
-            publishDiagnostics: { relatedInformation: true },
-            completion: {
-              completionItem: {
-                snippetSupport: true,
-                documentationFormat: ['markdown', 'plaintext']
+
+      try {
+        const initializeResult = await this.sendRequest('initialize', {
+          processId: null,
+          rootUri: this.workspaceUri,
+          workspaceFolders: [{ uri: this.workspaceUri, name: 'workspace' }],
+          capabilities: {
+            textDocument: {
+              publishDiagnostics: { relatedInformation: true },
+              completion: {
+                completionItem: {
+                  snippetSupport: true,
+                  documentationFormat: ['markdown', 'plaintext']
+                }
+              },
+              hover: {
+                contentFormat: ['markdown', 'plaintext']
+              },
+              semanticTokens: {
+                dynamicRegistration: false,
+                tokenTypes: SUPPORTED_SEMANTIC_TOKEN_TYPES,
+                tokenModifiers: SUPPORTED_SEMANTIC_TOKEN_MODIFIERS,
+                formats: ['relative'],
+                requests: {
+                  full: true
+                },
+                multilineTokenSupport: true,
+                overlappingTokenSupport: false
               }
             },
-            hover: {
-              contentFormat: ['markdown', 'plaintext']
-            },
-            semanticTokens: {
-              dynamicRegistration: false,
-              tokenTypes: SUPPORTED_SEMANTIC_TOKEN_TYPES,
-              tokenModifiers: SUPPORTED_SEMANTIC_TOKEN_MODIFIERS,
-              formats: ['relative'],
-              requests: {
-                full: true
-              },
-              multilineTokenSupport: true,
-              overlappingTokenSupport: false
+            workspace: {
+              configuration: true
             }
           },
-          workspace: {
-            configuration: true
-          }
-        },
-        initializationOptions: {}
-      });
+          initializationOptions: {}
+        });
 
-      this.sendNotification('initialized', {});
-      this.sendNotification('textDocument/didOpen', {
-        textDocument: {
-          uri: this.uri,
-          languageId: this.languageId,
-          version: this.docVersion,
-          text: this.model.getValue()
+        this.sendNotification('initialized', {});
+        this.sendNotification('textDocument/didOpen', {
+          textDocument: {
+            uri: this.uri,
+            languageId: this.languageId,
+            version: this.docVersion,
+            text: this.model.getValue()
+          }
+        });
+        if (!this.isActive()) {
+          this.manuallyStopped = true;
+          this.socket?.close();
+          return;
         }
-      });
-      this.isReady = true;
-      this.registerProviders(initializeResult?.capabilities || {});
+        this.isReady = true;
+        if (!this.providersRegistered) {
+          this.registerProviders(initializeResult?.capabilities || {});
+          this.providersRegistered = true;
+        }
+      } catch (error) {
+        this.log(`${this.language} lsp initialize failed`);
+        this.handleDisconnect();
+      }
     };
 
     this.socket.onmessage = (event) => {
@@ -364,31 +429,36 @@ export class LSPClient {
 
     this.socket.onclose = () => {
       this.log(`${this.language} lsp disconnected`);
-      this.dispose();
+      this.handleDisconnect();
     };
 
     this.socket.onerror = () => {
       this.log(`${this.language} lsp socket error`);
     };
 
-    const changeDisposable = this.model.onDidChangeContent(() => {
-      if (!this.isReady) {
-        return;
-      }
-      this.docVersion += 1;
-      this.sendNotification('textDocument/didChange', {
-        textDocument: {
-          uri: this.uri,
-          version: this.docVersion
-        },
-        contentChanges: [{ text: this.model.getValue() }]
+    if (!this.changeDisposable) {
+      this.changeDisposable = this.model.onDidChangeContent(() => {
+        if (!this.isReady) {
+          return;
+        }
+        this.docVersion += 1;
+        this.sendNotification('textDocument/didChange', {
+          textDocument: {
+            uri: this.uri,
+            version: this.docVersion
+          },
+          contentChanges: [{ text: this.model.getValue() }]
+        });
       });
-    });
 
-    this.disposables.push(changeDisposable);
+      this.disposables.push(this.changeDisposable);
+    }
   }
 
   async stop() {
+    this.manuallyStopped = true;
+    this.clearReconnectTimer();
+
     if (this.isReady) {
       this.sendNotification('textDocument/didClose', {
         textDocument: { uri: this.uri }
@@ -408,9 +478,48 @@ export class LSPClient {
     this.dispose();
   }
 
+  handleDisconnect() {
+    if (this.disconnectHandled) {
+      return;
+    }
+    this.disconnectHandled = true;
+    this.isReady = false;
+    this.pending.forEach(({ reject }) => reject(new Error('LSP disconnected')));
+    this.pending.clear();
+
+    if (this.manuallyStopped || !this.isActive()) {
+      return;
+    }
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.log(`${this.language} lsp reconnect failed after 3 attempts`);
+      return;
+    }
+
+    this.reconnectAttempts += 1;
+    const attempt = this.reconnectAttempts;
+    this.log(`${this.language} lsp reconnecting (${attempt}/3)`);
+    this.clearReconnectTimer();
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.manuallyStopped || !this.isActive()) {
+        return;
+      }
+      this.connect();
+    }, 1000 * attempt);
+  }
+
+  clearReconnectTimer() {
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   dispose() {
     this.pending.forEach(({ reject }) => reject(new Error('LSP disconnected')));
     this.pending.clear();
+    this.clearReconnectTimer();
     this.monaco.editor.setModelMarkers(this.model, 'lsp', []);
     this.disposables.forEach((d) => d.dispose());
     this.disposables = [];
@@ -607,7 +716,15 @@ export class LSPClient {
 
           return {
             suggestions: items.map((item) => {
-              const insertText = item.insertText || item.label;
+              const textEdit = item.textEdit?.newText ? item.textEdit : null;
+              const insertText = normalizeSnippetInsertText(
+                this.language,
+                textEdit?.newText || item.insertText || item.label
+              );
+              const insertTextFormat = item.insertTextFormat === 2
+                ? this.monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+                : undefined;
+
               return {
                 label: item.label,
                 kind:
@@ -620,7 +737,8 @@ export class LSPClient {
                     ? item.documentation
                     : item.documentation?.value,
                 insertText,
-                range: undefined
+                insertTextRules: insertTextFormat,
+                range: toMonacoRange(this.monaco, textEdit?.range)
               };
             })
           };

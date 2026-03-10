@@ -376,6 +376,7 @@ export default function App() {
   const currentRunIdRef = useRef(null);
   const currentRunAbortRef = useRef(null);
   const stopRequestedRef = useRef(false);
+  const lspSessionRef = useRef(0);
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -417,6 +418,9 @@ export default function App() {
       return;
     }
 
+    const sessionId = lspSessionRef.current + 1;
+    lspSessionRef.current = sessionId;
+
     if (lspRef.current) {
       await lspRef.current.stop();
       lspRef.current = null;
@@ -427,15 +431,17 @@ export default function App() {
       return;
     }
 
-    lspRef.current = new LSPClient({
+    const nextClient = new LSPClient({
       monaco: monacoRef.current,
       language: lang,
       languageId: model.getLanguageId(),
       model,
       onLog: appendLog,
+      isActive: () => lspSessionRef.current === sessionId && lspRef.current === nextClient,
       workspaceUri: LSP_WORKSPACE_URI
     });
-    lspRef.current.start();
+    lspRef.current = nextClient;
+    nextClient.start();
   };
 
   const onEditorMount = (editor, monaco) => {
@@ -1251,7 +1257,14 @@ export default function App() {
                 automaticLayout: true,
                 tabSize: 4,
                 insertSpaces: true,
-                lineNumbersMinChars: 3
+                lineNumbersMinChars: 3,
+                tabCompletion: 'on',
+                snippetSuggestions: 'inline',
+                acceptSuggestionOnEnter: 'on',
+                suggest: {
+                  showSnippets: true,
+                  snippetsPreventQuickSuggestions: false
+                }
               }}
             />
           </div>
