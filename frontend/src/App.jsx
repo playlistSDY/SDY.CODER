@@ -269,7 +269,11 @@ function buildStatusBlock(
 ) {
   const lines = ['[status]'];
 
-  if (typeof queueWaitMs === 'number' || typeof queuePositionAtEnqueue === 'number') {
+  const shouldShowQueueWait =
+    typeof queuePositionAtEnqueue === 'number' ||
+    (typeof queueWaitMs === 'number' && queueWaitMs > 0);
+
+  if (shouldShowQueueWait) {
     const wait = typeof queueWaitMs === 'number' ? formatDurationWithSeconds(queueWaitMs) : 'N/A';
     const position =
       typeof queuePositionAtEnqueue === 'number' ? `#${queuePositionAtEnqueue}` : 'N/A';
