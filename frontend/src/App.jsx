@@ -348,6 +348,7 @@ export default function App() {
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
   const [editorStatus, setEditorStatus] = useState({
     lineCount: 0,
     lineNumber: 1,
@@ -1149,6 +1150,48 @@ export default function App() {
     }
   };
 
+  const openResetModal = () => {
+    setResetModalOpen(true);
+  };
+
+  const closeResetModal = () => {
+    setResetModalOpen(false);
+  };
+
+  const resetCurrentCode = () => {
+    const model = modelsRef.current.get(language);
+    const editor = editorRef.current;
+    const starter = LANGUAGES.find((item) => item.id === language)?.starter;
+
+    if (!model || typeof starter !== 'string') {
+      setResetModalOpen(false);
+      return;
+    }
+
+    model.setValue(starter);
+    saveLastCode(language, starter);
+    if (editor && editor.getModel() === model) {
+      editor.setPosition({ lineNumber: 1, column: 1 });
+      editor.setSelection({
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 1,
+        endColumn: 1
+      });
+      editor.focus();
+    }
+
+    setEditorStatus({
+      lineCount: model.getLineCount(),
+      lineNumber: 1,
+      column: 1,
+      selectedChars: 0,
+      isFocused: true
+    });
+    appendLog(`editor reset to default starter (${language})`);
+    setResetModalOpen(false);
+  };
+
   const renderOutput = () => {
     if (!output) {
       return output;
@@ -1222,6 +1265,14 @@ export default function App() {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            className="control-btn secondary-btn"
+            onClick={openResetModal}
+            disabled={running}
+          >
+            Reset
+          </button>
           <button
             type="button"
             className={`run-btn${running ? ' stop-btn' : ''}`}
@@ -1336,6 +1387,32 @@ export default function App() {
           </div>
         </section>
       </main>
+      {resetModalOpen ? (
+        <div className="modal-backdrop" onClick={closeResetModal}>
+          <div
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="reset-modal-title">
+              Reset Code
+            </div>
+            <div className="confirm-modal-body">
+              현재 언어의 코드를 기본 예제로 초기화하시겠습니까?
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closeResetModal}>
+                Cancel
+              </button>
+              <button type="button" className="control-btn danger-btn" onClick={resetCurrentCode}>
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
