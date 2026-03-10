@@ -198,11 +198,36 @@ function canExecute(command) {
   return result.status === 0;
 }
 
+function resolveExecutablePath(command) {
+  if (command.includes('/')) {
+    return existsSync(command) ? command : null;
+  }
+
+  const localBin = path.join(BACKEND_DIR, 'node_modules', '.bin', command);
+  if (existsSync(localBin)) {
+    return localBin;
+  }
+
+  const result = spawnSync('/bin/sh', ['-lc', `command -v "${command}"`], {
+    encoding: 'utf8'
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const resolved = (result.stdout || '').trim().split('\n')[0];
+  return resolved || null;
+}
+
 function resolveLspCommand(language) {
   const candidates = LSP_CANDIDATES[language] || [];
   for (const candidate of candidates) {
-    if (canExecute(candidate.cmd)) {
-      return candidate;
+    const resolvedCmd = resolveExecutablePath(candidate.cmd);
+    if (resolvedCmd) {
+      return {
+        ...candidate,
+        resolvedCmd
+      };
     }
   }
   return null;
@@ -324,7 +349,7 @@ async function createLspBridge(ws, language) {
     return;
   }
 
-  const child = spawn(selected.cmd, selected.args, {
+  const child = spawn(selected.resolvedCmd || selected.cmd, selected.args, {
     cwd: LSP_WORKSPACE_DIR,
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -421,7 +446,7 @@ async function createLspBridge(ws, language) {
 
   child.on('error', () => {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.close(1011, `Failed to start ${selected.cmd}`);
+      ws.close(1011, `Failed to start ${selected.resolvedCmd || selected.cmd}`);
     }
   });
 }

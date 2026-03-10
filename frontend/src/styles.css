@@ -194,6 +194,26 @@ body,
   font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
 }
 
+.output-status-block {
+  display: block;
+  color: #8f8f8f;
+}
+
+.output-stdout-block {
+  display: block;
+  color: var(--text-main);
+}
+
+.output-stderr-block {
+  display: block;
+  color: #ff7b72;
+}
+
+.output-plain-block {
+  display: block;
+  color: var(--text-main);
+}
+
 .logs-body {
   display: block;
 }

@@ -231,6 +231,13 @@ function getClientPoint(event) {
   return null;
 }
 
+function formatDurationWithSeconds(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) {
+    return 'N/A';
+  }
+  return `${ms.toFixed(3)} ms (${(ms / 1000).toFixed(3)} s)`;
+}
+
 function defineDarkModernTheme(monaco) {
   monaco.editor.defineTheme('vscode-dark-modern', {
     base: 'vs-dark',
@@ -683,10 +690,10 @@ export default function App() {
         const statusBlock = [
           '[status]',
           Number.isFinite(containerOpenMs)
-            ? `Opening container: ${containerOpenMs.toFixed(3)} ms`
+            ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
             : 'Opening container: N/A',
           typeof result.executionMs === 'number'
-            ? `Code execution time: ${result.executionMs.toFixed(3)} ms`
+            ? `Code execution time: ${formatDurationWithSeconds(result.executionMs)}`
             : 'Code execution time: N/A'
         ].join('\n');
 
@@ -710,10 +717,10 @@ export default function App() {
       const statusBlock = [
         '[status]',
         Number.isFinite(containerOpenMs)
-          ? `Opening container: ${containerOpenMs.toFixed(3)} ms`
+          ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
           : 'Opening container: N/A',
         typeof result.executionMs === 'number'
-          ? `Code execution time: ${result.executionMs.toFixed(3)} ms`
+          ? `Code execution time: ${formatDurationWithSeconds(result.executionMs)}`
           : 'Code execution time: N/A'
       ].join('\n');
 
@@ -735,6 +742,54 @@ export default function App() {
       }
       setRunning(false);
     }
+  };
+
+  const renderOutput = () => {
+    if (!output) {
+      return output;
+    }
+
+    const sectionPattern = /^\[(status|stdout|stderr|error)\]\n/gm;
+    const matches = Array.from(output.matchAll(sectionPattern));
+    if (matches.length === 0) {
+      return output;
+    }
+
+    const chunks = [];
+    let key = 0;
+
+    if (matches[0].index > 0) {
+      chunks.push(
+        <span key={`plain-${key++}`} className="output-plain-block">
+          {output.slice(0, matches[0].index)}
+        </span>
+      );
+    }
+
+    for (let i = 0; i < matches.length; i += 1) {
+      const current = matches[i];
+      const next = matches[i + 1];
+      const start = current.index;
+      const end = next ? next.index : output.length;
+      const raw = output.slice(start, end);
+      const section = current[1];
+      const className =
+        section === 'status'
+          ? 'output-status-block'
+          : section === 'stderr' || section === 'error'
+            ? 'output-stderr-block'
+            : section === 'stdout'
+              ? 'output-stdout-block'
+              : 'output-plain-block';
+
+      chunks.push(
+        <span key={`section-${key++}`} className={className}>
+          {raw}
+        </span>
+      );
+    }
+
+    return chunks;
   };
 
   return (
@@ -824,7 +879,7 @@ export default function App() {
           <div className="panel-slot" style={{ flexGrow: panelRatios[1], flexBasis: 0 }}>
             <div className="panel">
               <div className="panel-title">Output</div>
-              <pre className="panel-body">{output}</pre>
+              <pre className="panel-body">{renderOutput()}</pre>
             </div>
           </div>
           <div
