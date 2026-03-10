@@ -23,6 +23,7 @@ const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE || 'web-vscode-backend:latest';
 const SANDBOX_CPU_LIMIT = process.env.SANDBOX_CPU_LIMIT || '1.0';
 const SANDBOX_MEMORY_LIMIT = process.env.SANDBOX_MEMORY_LIMIT || '512m';
 const SANDBOX_PIDS_LIMIT = Number(process.env.SANDBOX_PIDS_LIMIT || 128);
+const SANDBOX_MAX_CONTAINERS = Number(process.env.SANDBOX_MAX_CONTAINERS || 2);
 const SANDBOX_WORKSPACE_SIZE = process.env.SANDBOX_WORKSPACE_SIZE || '256m';
 const SANDBOX_TMP_SIZE = process.env.SANDBOX_TMP_SIZE || '128m';
 const SANDBOX_USER = process.env.SANDBOX_USER || '65534:65534';
@@ -37,6 +38,9 @@ const SANDBOX_MEM_PEAK_MARKER = '__WEB_SANDBOX_MEM_PEAK_BYTES__=';
 const PHASE_MARKER = '__WEB_PHASE__=';
 const RUNTIME_INFO_TTL_MS = Number(process.env.RUNTIME_INFO_TTL_MS || 10 * 60 * 1000);
 const runtimeInfoCache = new Map();
+let sandboxActiveContainers = 0;
+let sandboxQueueSeq = 0;
+const sandboxWaitQueue = [];
 
 function parseMemoryLimitToBytes(raw) {
   if (!raw) {
@@ -63,6 +67,94 @@ function parseMemoryLimitToBytes(raw) {
             ? 1024 ** 4
             : 1;
   return Math.round(value * scale);
+}
+
+function notifySandboxQueuePositions() {
+  sandboxWaitQueue.forEach((entry, index) => {
+    if (typeof entry.onQueueEvent === 'function') {
+      entry.onQueueEvent({ phase: 'queue_wait_update', position: index + 1 });
+    }
+  });
+}
+
+function tryGrantSandboxQueue() {
+  if (sandboxActiveContainers >= SANDBOX_MAX_CONTAINERS) {
+    return;
+  }
+  if (sandboxWaitQueue.length === 0) {
+    return;
+  }
+
+  const entry = sandboxWaitQueue.shift();
+  sandboxActiveContainers += 1;
+  const queueWaitMs = Date.now() - entry.enqueuedAt;
+  if (typeof entry.onQueueEvent === 'function') {
+    entry.onQueueEvent({
+      phase: 'queue_wait_end',
+      ms: queueWaitMs,
+      position: entry.queuePositionAtEnqueue
+    });
+  }
+  entry.resolve({ queueWaitMs, queuePositionAtEnqueue: entry.queuePositionAtEnqueue });
+  notifySandboxQueuePositions();
+}
+
+function acquireSandboxSlot({ onQueueEvent = null } = {}) {
+  if (SANDBOX_PROVIDER !== 'docker') {
+    return Promise.resolve({ queueWaitMs: 0, queuePositionAtEnqueue: null });
+  }
+
+  if (sandboxActiveContainers < SANDBOX_MAX_CONTAINERS) {
+    sandboxActiveContainers += 1;
+    return Promise.resolve({ queueWaitMs: 0, queuePositionAtEnqueue: null });
+  }
+
+  return new Promise((resolve) => {
+    const queuePositionAtEnqueue = sandboxWaitQueue.length + 1;
+    const entry = {
+      id: ++sandboxQueueSeq,
+      enqueuedAt: Date.now(),
+      queuePositionAtEnqueue,
+      onQueueEvent,
+      resolve
+    };
+    sandboxWaitQueue.push(entry);
+    if (typeof onQueueEvent === 'function') {
+      onQueueEvent({ phase: 'queue_wait_start', position: queuePositionAtEnqueue });
+    }
+    notifySandboxQueuePositions();
+  });
+}
+
+function releaseSandboxSlot() {
+  if (SANDBOX_PROVIDER !== 'docker') {
+    return;
+  }
+  sandboxActiveContainers = Math.max(0, sandboxActiveContainers - 1);
+  tryGrantSandboxQueue();
+}
+
+async function runWithSandboxQueue(runFn, { onQueueEvent = null } = {}) {
+  const slot = await acquireSandboxSlot({ onQueueEvent });
+  let released = false;
+  const release = () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    releaseSandboxSlot();
+  };
+
+  try {
+    const result = await runFn();
+    return {
+      ...result,
+      queueWaitMs: slot.queueWaitMs,
+      queuePositionAtEnqueue: slot.queuePositionAtEnqueue
+    };
+  } finally {
+    release();
+  }
 }
 
 const LSP_CANDIDATES = {
@@ -1173,6 +1265,49 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
   }
 }
 
+function withExecutionTimeoutMessage(stderr, timedOut) {
+  if (!timedOut) {
+    return stderr || '';
+  }
+  const base = stderr || '';
+  return base ? `${base}\nExecution timed out` : 'Execution timed out';
+}
+
+function appendRuntimeDiagnostic(stderr, result) {
+  const base = (stderr || '').trim();
+  const notes = [];
+
+  const hasKillSignal = /(^|\n)\s*killed\s*($|\n)/i.test(base);
+  const exitCode = typeof result?.code === 'number' ? result.code : null;
+  const memPeak = typeof result?.sandboxMemoryPeakBytes === 'number' ? result.sandboxMemoryPeakBytes : null;
+  const memLimit = typeof result?.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null;
+  const cpu = typeof result?.sandboxCpuPercent === 'number' ? result.sandboxCpuPercent : null;
+  const cpuLimit = typeof result?.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null;
+
+  const memoryPressure =
+    memPeak !== null && memLimit !== null && memLimit > 0 ? memPeak / memLimit : null;
+  const likelyOom = (exitCode === 137 || hasKillSignal) && memoryPressure !== null && memoryPressure >= 0.95;
+
+  if (likelyOom) {
+    notes.push(
+      `Likely out-of-memory: process reached ${Math.round(memoryPressure * 100)}% of sandbox memory limit (${Math.round(memPeak / (1024 * 1024))} MB / ${Math.round(memLimit / (1024 * 1024))} MB).`
+    );
+  } else if (exitCode === 137 || hasKillSignal) {
+    notes.push('Process was terminated by the sandbox (SIGKILL).');
+  }
+
+  if (result?.timedOut && cpu !== null && cpuLimit !== null && cpu >= 90) {
+    notes.push(
+      `CPU was saturated near the sandbox limit (${cpu.toFixed(1)}% of ${cpuLimit} vCPU), which can contribute to timeout.`
+    );
+  }
+
+  if (notes.length === 0) {
+    return base;
+  }
+  return [base, ...notes].filter(Boolean).join('\n');
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, at: new Date().toISOString() });
 });
@@ -1203,9 +1338,20 @@ app.post('/api/run', async (req, res) => {
         });
         return;
       }
-      result = await runInDockerSandbox(language, code, stdin);
+      result = await runWithSandboxQueue(
+        () => runInDockerSandbox(language, code, stdin),
+        { onQueueEvent: null }
+      );
     } else {
       result = await runCodeLocally(language, code, stdin);
+    }
+
+    if (typeof result.queueWaitMs === 'number' && result.queueWaitMs > 0) {
+      result.logs = result.logs || [];
+      result.logs.push(`  queue wait time: ${(result.queueWaitMs / 1000).toFixed(3)} s`);
+      if (typeof result.queuePositionAtEnqueue === 'number') {
+        result.logs.push(`  queue position at enqueue: #${result.queuePositionAtEnqueue}`);
+      }
     }
 
     if (result.compileError) {
@@ -1221,6 +1367,9 @@ app.post('/api/run', async (req, res) => {
         sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
         sandboxMemoryLimitBytes:
           typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
+        queueWaitMs: typeof result.queueWaitMs === 'number' ? result.queueWaitMs : 0,
+        queuePositionAtEnqueue:
+          typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
         containerOpenMs:
           typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
         logs: result.logs || []
@@ -1230,7 +1379,7 @@ app.post('/api/run', async (req, res) => {
 
     res.json({
       stdout: result.stdout,
-      stderr: result.timedOut ? `${result.stderr}\nExecution timed out` : result.stderr,
+      stderr: appendRuntimeDiagnostic(withExecutionTimeoutMessage(result.stderr, result.timedOut), result),
       executionMs: typeof result.executionMs === 'number' ? result.executionMs : null,
       compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
       sandboxCpuPercent:
@@ -1240,6 +1389,9 @@ app.post('/api/run', async (req, res) => {
       sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
       sandboxMemoryLimitBytes:
         typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
+      queueWaitMs: typeof result.queueWaitMs === 'number' ? result.queueWaitMs : 0,
+      queuePositionAtEnqueue:
+        typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
       logs: result.logs || []
     });
@@ -1280,7 +1432,7 @@ app.post('/api/run/stream', async (req, res) => {
 
   try {
     let result;
-    const onPhase = ({ phase, ms = null }) => sendEvent('phase', { phase, ms });
+    const onPhase = (payload) => sendEvent('phase', payload);
     if (SANDBOX_PROVIDER === 'docker') {
       if (!isDockerSandboxAvailable()) {
         sendEvent('final', {
@@ -1291,9 +1443,20 @@ app.post('/api/run/stream', async (req, res) => {
         res.end();
         return;
       }
-      result = await runInDockerSandbox(language, code, stdin, { onPhase });
+      result = await runWithSandboxQueue(
+        () => runInDockerSandbox(language, code, stdin, { onPhase }),
+        { onQueueEvent: onPhase }
+      );
     } else {
       result = await runCodeLocally(language, code, stdin, { onPhase });
+    }
+
+    if (typeof result.queueWaitMs === 'number' && result.queueWaitMs > 0) {
+      result.logs = result.logs || [];
+      result.logs.push(`  queue wait time: ${(result.queueWaitMs / 1000).toFixed(3)} s`);
+      if (typeof result.queuePositionAtEnqueue === 'number') {
+        result.logs.push(`  queue position at enqueue: #${result.queuePositionAtEnqueue}`);
+      }
     }
 
     if (result.compileError) {
@@ -1310,6 +1473,9 @@ app.post('/api/run/stream', async (req, res) => {
         sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
         sandboxMemoryLimitBytes:
           typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
+        queueWaitMs: typeof result.queueWaitMs === 'number' ? result.queueWaitMs : 0,
+        queuePositionAtEnqueue:
+          typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
         containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
         logs: result.logs || []
       });
@@ -1320,7 +1486,7 @@ app.post('/api/run/stream', async (req, res) => {
     sendEvent('final', {
       ok: true,
       stdout: result.stdout,
-      stderr: result.timedOut ? `${result.stderr}\nExecution timed out` : result.stderr,
+      stderr: appendRuntimeDiagnostic(withExecutionTimeoutMessage(result.stderr, result.timedOut), result),
       executionMs: typeof result.executionMs === 'number' ? result.executionMs : null,
       compileMs: typeof result.compileMs === 'number' ? result.compileMs : null,
       sandboxCpuPercent:
@@ -1330,6 +1496,9 @@ app.post('/api/run/stream', async (req, res) => {
       sandboxCpuLimit: typeof result.sandboxCpuLimit === 'number' ? result.sandboxCpuLimit : null,
       sandboxMemoryLimitBytes:
         typeof result.sandboxMemoryLimitBytes === 'number' ? result.sandboxMemoryLimitBytes : null,
+      queueWaitMs: typeof result.queueWaitMs === 'number' ? result.queueWaitMs : 0,
+      queuePositionAtEnqueue:
+        typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
       logs: result.logs || []
     });

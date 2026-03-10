@@ -263,14 +263,24 @@ function buildStatusBlock(
   sandboxCpuPercent = null,
   sandboxCpuLimit = null,
   sandboxMemoryPeakBytes = null,
-  sandboxMemoryLimitBytes = null
+  sandboxMemoryLimitBytes = null,
+  queueWaitMs = null,
+  queuePositionAtEnqueue = null
 ) {
-  const lines = [
-    '[status]',
+  const lines = ['[status]'];
+
+  if (typeof queueWaitMs === 'number' || typeof queuePositionAtEnqueue === 'number') {
+    const wait = typeof queueWaitMs === 'number' ? formatDurationWithSeconds(queueWaitMs) : 'N/A';
+    const position =
+      typeof queuePositionAtEnqueue === 'number' ? `#${queuePositionAtEnqueue}` : 'N/A';
+    lines.push(`Queue wait: ${wait} / position ${position}`);
+  }
+
+  lines.push(
     Number.isFinite(containerOpenMs)
       ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
       : 'Opening container: N/A'
-  ];
+  );
 
   if (typeof compileMs === 'number') {
     lines.push(`Compile time: ${formatDurationWithSeconds(compileMs)}`);
@@ -700,36 +710,57 @@ export default function App() {
     let openingLogId = null;
     let compileLogId = null;
     let runLogId = null;
+    let queueLogId = null;
     const runStartedAt = performance.now();
     const isCompiledLanguage = COMPILED_LANGUAGES.has(language);
     const progress = {
       phase: 'opening',
       phaseStartedAt: runStartedAt,
+      openStartedAt: runStartedAt,
       openMs: 0,
       compileMs: isCompiledLanguage ? 0 : null,
       executionMs: 0,
+      queueWaitMs: null,
+      queuePositionAtEnqueue: null,
+      queueStartedAt: null,
       openFrozen: false,
       compileFrozen: false,
-      executionFrozen: false
+      executionFrozen: false,
+      queueFrozen: true
     };
     let finalResult = null;
 
     const refreshProgressOutput = () => {
       const now = performance.now();
       if (progress.phase === 'opening' && !progress.openFrozen) {
-        progress.openMs = Number((now - runStartedAt).toFixed(3));
+        progress.openMs = Number((now - progress.openStartedAt).toFixed(3));
       } else if (progress.phase === 'compile' && !progress.compileFrozen) {
         progress.compileMs = Number((now - progress.phaseStartedAt).toFixed(3));
       } else if (progress.phase === 'run' && !progress.executionFrozen) {
         progress.executionMs = Number((now - progress.phaseStartedAt).toFixed(3));
+      } else if (progress.phase === 'queue' && !progress.queueFrozen && progress.queueStartedAt) {
+        progress.queueWaitMs = Number((now - progress.queueStartedAt).toFixed(3));
       }
-      setOutput(buildStatusBlock(progress.openMs, progress.compileMs, progress.executionMs));
+      setOutput(
+        buildStatusBlock(
+          progress.openMs,
+          progress.compileMs,
+          progress.executionMs,
+          null,
+          null,
+          null,
+          null,
+          progress.queueWaitMs,
+          progress.queuePositionAtEnqueue
+        )
+      );
     };
 
     try {
       setRunning(true);
       refreshProgressOutput();
       appendLog(`run requested (${language})`);
+      queueLogId = appendLogWithId('  queue waiting... 0 ms (N/A)');
       openingLogId = appendLogWithId('  opening container... 0 ms');
       if (isCompiledLanguage) {
         compileLogId = appendLogWithId('  compile time... 0 ms');
@@ -744,6 +775,16 @@ export default function App() {
         }
         if (runLogId) {
           updateLogById(runLogId, `  code execution time... ${progress.executionMs.toFixed(0)} ms`);
+        }
+        if (queueLogId && progress.queueWaitMs !== null) {
+          const queuePositionLabel =
+            typeof progress.queuePositionAtEnqueue === 'number'
+              ? `#${progress.queuePositionAtEnqueue}`
+              : 'N/A';
+          updateLogById(
+            queueLogId,
+            `  queue waiting... ${progress.queueWaitMs.toFixed(0)} ms (${queuePositionLabel})`
+          );
         }
         refreshProgressOutput();
       }, 80);
@@ -770,7 +811,52 @@ export default function App() {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      const applyPhase = (phase, ms) => {
+      const applyPhase = (phase, ms, eventPayload = null) => {
+        if (phase === 'queue_wait_start') {
+          progress.queuePositionAtEnqueue =
+            typeof eventPayload?.position === 'number'
+              ? eventPayload.position
+              : progress.queuePositionAtEnqueue;
+          progress.queueWaitMs = 0;
+          progress.queueStartedAt = performance.now();
+          progress.queueFrozen = false;
+          progress.phase = 'queue';
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'queue_wait_update') {
+          if (typeof eventPayload?.position === 'number') {
+            progress.queuePositionAtEnqueue = eventPayload.position;
+          }
+          refreshProgressOutput();
+          return;
+        }
+
+        if (phase === 'queue_wait_end') {
+          if (typeof ms === 'number') {
+            progress.queueWaitMs = ms;
+          } else if (progress.queueStartedAt) {
+            progress.queueWaitMs = Number((performance.now() - progress.queueStartedAt).toFixed(3));
+          }
+          progress.queueFrozen = true;
+          progress.phase = 'opening';
+          progress.openStartedAt = performance.now();
+          progress.openMs = 0;
+          if (queueLogId && progress.queueWaitMs !== null) {
+            const queuePositionLabel =
+              typeof progress.queuePositionAtEnqueue === 'number'
+                ? `#${progress.queuePositionAtEnqueue}`
+                : 'N/A';
+            updateLogById(
+              queueLogId,
+              `  queue waiting... ${progress.queueWaitMs.toFixed(3)} ms (${queuePositionLabel})`
+            );
+          }
+          refreshProgressOutput();
+          return;
+        }
+
         if (phase === 'open_done') {
           if (typeof ms === 'number') {
             progress.openMs = ms;
@@ -848,7 +934,7 @@ export default function App() {
           }
 
           if (eventPayload.event === 'phase') {
-            applyPhase(eventPayload.phase, eventPayload.ms);
+            applyPhase(eventPayload.phase, eventPayload.ms, eventPayload);
             continue;
           }
 
@@ -862,7 +948,7 @@ export default function App() {
         try {
           const eventPayload = JSON.parse(buffer.trim());
           if (eventPayload.event === 'phase') {
-            applyPhase(eventPayload.phase, eventPayload.ms);
+            applyPhase(eventPayload.phase, eventPayload.ms, eventPayload);
           } else if (eventPayload.event === 'final') {
             finalResult = eventPayload;
           }
@@ -890,6 +976,14 @@ export default function App() {
           ? `  opening container... ${containerOpenMs.toFixed(3)} ms`
           : '  opening container... done'
       );
+      if (queueLogId) {
+        const queueWaitMs = typeof finalResult.queueWaitMs === 'number' ? finalResult.queueWaitMs : 0;
+        const queuePositionLabel =
+          typeof finalResult.queuePositionAtEnqueue === 'number'
+            ? `#${finalResult.queuePositionAtEnqueue}`
+            : 'N/A';
+        updateLogById(queueLogId, `  queue waiting... ${queueWaitMs.toFixed(3)} ms (${queuePositionLabel})`);
+      }
       if (compileLogId && typeof finalResult.compileMs === 'number') {
         updateLogById(compileLogId, `  compile time... ${finalResult.compileMs.toFixed(3)} ms`);
       }
@@ -905,7 +999,9 @@ export default function App() {
           finalResult.sandboxCpuPercent,
           finalResult.sandboxCpuLimit,
           finalResult.sandboxMemoryPeakBytes,
-          finalResult.sandboxMemoryLimitBytes
+          finalResult.sandboxMemoryLimitBytes,
+          finalResult.queueWaitMs,
+          finalResult.queuePositionAtEnqueue
         );
 
         const failureOutput = [
@@ -928,7 +1024,9 @@ export default function App() {
         finalResult.sandboxCpuPercent,
         finalResult.sandboxCpuLimit,
         finalResult.sandboxMemoryPeakBytes,
-        finalResult.sandboxMemoryLimitBytes
+        finalResult.sandboxMemoryLimitBytes,
+        finalResult.queueWaitMs,
+        finalResult.queuePositionAtEnqueue
       );
 
       const next = [
