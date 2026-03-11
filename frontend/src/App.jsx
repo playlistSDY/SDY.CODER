@@ -1954,14 +1954,15 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div className="explorer-actions">
-              <button type="button" className="control-btn secondary-btn explorer-new-file-btn" onClick={openCreateFileModal}>
-                New File
+            <div className="explorer-files-header">
+              <span>FILES</span>
+              <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
+                +
               </button>
             </div>
             <div className="explorer-files">
               {files.length === 0 ? (
-                <div className="explorer-empty">아직 파일이 없습니다. `New File` 버튼으로 새 파일을 만드세요.</div>
+                <div className="explorer-empty">아직 파일이 없습니다. `+` 버튼으로 새 파일을 만드세요.</div>
               ) : (
                 files.map((file) => (
                   <div key={file.id} className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}>
