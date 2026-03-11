@@ -593,6 +593,10 @@ export default function App() {
   };
 
   const scheduleFileSave = (fileId, content) => {
+    if (!user) {
+      setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file)));
+      return;
+    }
     const prev = saveTimersRef.current.get(fileId);
     if (prev) {
       window.clearTimeout(prev);
