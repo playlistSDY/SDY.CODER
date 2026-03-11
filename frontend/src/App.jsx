@@ -875,7 +875,7 @@ export default function App() {
   }, [user, files, selectedFileId]);
 
   useEffect(() => {
-    if (!googleClientId || user) {
+    if (!googleClientId || user || !explorerOpen) {
       return;
     }
 
@@ -930,7 +930,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [googleClientId, user]);
+  }, [googleClientId, user, explorerOpen]);
 
   useEffect(() => {
     return () => {
