@@ -193,6 +193,32 @@ function saveGuestWorkspace(files, selectedFileId) {
   }
 }
 
+function getUserSelectedFileStorageKey(userId) {
+  return `web-vscode:selected-file:${userId}`;
+}
+
+function loadUserSelectedFileId(userId) {
+  if (typeof window === 'undefined' || !userId) {
+    return null;
+  }
+  try {
+    return window.localStorage.getItem(getUserSelectedFileStorageKey(userId));
+  } catch {
+    return null;
+  }
+}
+
+function saveUserSelectedFileId(userId, fileId) {
+  if (typeof window === 'undefined' || !userId) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(getUserSelectedFileStorageKey(userId), fileId || '');
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 function loadSidePaneWidth() {
   if (typeof window === 'undefined') {
     return DEFAULT_SIDE_PANE_WIDTH_PX;
@@ -924,8 +950,14 @@ export default function App() {
           return;
         }
         const nextFiles = payload.files || [];
+        const storedSelectedFileId = loadUserSelectedFileId(user?.id);
         setFiles(nextFiles);
-        setSelectedFileId((prev) => (prev && nextFiles.some((file) => file.id === prev) ? prev : nextFiles[0]?.id || null));
+        setSelectedFileId((prev) => {
+          if (storedSelectedFileId && nextFiles.some((file) => file.id === storedSelectedFileId)) {
+            return storedSelectedFileId;
+          }
+          return prev && nextFiles.some((file) => file.id === prev) ? prev : nextFiles[0]?.id || null;
+        });
       } catch (error) {
         if (!cancelled) {
           appendLog(`file load failed: ${error.message}`);
@@ -945,6 +977,13 @@ export default function App() {
     }
     saveGuestWorkspace(files, selectedFileId);
   }, [authLoading, user, files, selectedFileId]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      return;
+    }
+    saveUserSelectedFileId(user.id, selectedFileId);
+  }, [user?.id, selectedFileId]);
 
   useEffect(() => {
     if (!googleClientId || user || !explorerOpen) {
