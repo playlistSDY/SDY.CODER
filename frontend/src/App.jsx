@@ -313,14 +313,6 @@ function getModelUri(monaco, file) {
   return monaco.Uri.parse(`${LSP_WORKSPACE_URI}/${safeId}/${safeName}`);
 }
 
-function getCollapsedFileLabel(file) {
-  if (!file?.name) {
-    return '--';
-  }
-  const base = file.name.replace(/\.[^.]+$/, '').trim();
-  return (base || file.name).slice(0, 3);
-}
-
 function getClientPoint(event) {
   if (event?.touches && event.touches.length > 0) {
     return { x: event.touches[0].clientX, y: event.touches[0].clientY };
@@ -2007,14 +1999,21 @@ export default function App() {
             {user?.avatarUrl ? (
               <img className="explorer-rail-avatar" src={user.avatarUrl} alt={user.name} />
             ) : (
-              <div className="explorer-rail-badge">{user ? user.name.slice(0, 1).toUpperCase() : 'G'}</div>
+              <div className="explorer-avatar explorer-avatar-placeholder explorer-rail-avatar">?</div>
             )}
-            {selectedFile ? (
-              <div className="explorer-rail-file" title={selectedFile.name}>
-                {getCollapsedFileLabel(selectedFile)}
-              </div>
-            ) : null}
-            <div className="explorer-rail-index">{`${files.length}`}</div>
+            <div className="explorer-rail-files">
+              {files.map((file) => (
+                <button
+                  type="button"
+                  key={file.id}
+                  className={`explorer-rail-file${file.id === selectedFileId ? ' active' : ''}`}
+                  onClick={() => setSelectedFileId(file.id)}
+                  title={file.name}
+                >
+                  {file.name}
+                </button>
+              ))}
+            </div>
           </aside>
         ) : null}
 
