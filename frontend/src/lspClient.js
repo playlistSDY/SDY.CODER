@@ -178,6 +178,122 @@ function isLowSignalRawLogLine(rawLine) {
   return false;
 }
 
+const importSuggestionCache = new Map();
+
+async function fetchImportSuggestions(language, query = {}) {
+  const params = new URLSearchParams();
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') {
+      params.set(key, value);
+    }
+  });
+  const cacheKey = `${language}?${params.toString()}`;
+
+  if (importSuggestionCache.has(cacheKey)) {
+    return importSuggestionCache.get(cacheKey);
+  }
+
+  const promise = fetch(`/api/import-packages/${language}${params.size ? `?${params.toString()}` : ''}`)
+    .then(async (response) => {
+      if (!response.ok) {
+        throw new Error('Failed to load import suggestions');
+      }
+      const payload = await response.json();
+      return Array.isArray(payload?.items)
+        ? payload.items
+        : Array.isArray(payload?.packages)
+          ? payload.packages
+          : [];
+    })
+    .catch(() => [])
+    .then((items) => {
+      importSuggestionCache.set(cacheKey, items);
+      return items;
+    });
+
+  importSuggestionCache.set(cacheKey, promise);
+  return promise;
+}
+
+function getImportSuggestionContext(language, model, position) {
+  const line = model.getLineContent(position.lineNumber);
+  const beforeCursor = line.slice(0, position.column - 1);
+
+  if (language === 'python') {
+    let match = beforeCursor.match(/^\s*from\s+([A-Za-z0-9_\.]+)\s+import\s+([A-Za-z0-9_]*)$/);
+    if (match) {
+      return { mode: 'python-members', moduleName: match[1], prefix: match[2] || '' };
+    }
+    match = beforeCursor.match(/^\s*import\s+([A-Za-z0-9_\.]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    match = beforeCursor.match(/^\s*from\s+([A-Za-z0-9_\.]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    return null;
+  }
+
+  if (language === 'nodejs') {
+    const match = beforeCursor.match(/(?:from\s+['"]|require\(\s*['"])([^'"]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    return null;
+  }
+
+  if (language === 'go') {
+    let match = beforeCursor.match(/^\s*import\s+"([^"]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    match = beforeCursor.match(/^\s*"([^"]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    return null;
+  }
+
+  if (language === 'java') {
+    const match = beforeCursor.match(/^\s*import\s+([A-Za-z0-9_\.]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    return null;
+  }
+
+  if (language === 'csharp') {
+    const match = beforeCursor.match(/^\s*using\s+([A-Za-z0-9_\.]*)$/);
+    if (match) {
+      return { mode: 'packages', prefix: match[1] || '' };
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function buildImportSuggestions(monaco, packages, prefix, position) {
+  const startColumn = Math.max(1, position.column - prefix.length);
+  const loweredPrefix = prefix.toLowerCase();
+
+  return packages
+    .filter((name) => !loweredPrefix || name.toLowerCase().startsWith(loweredPrefix))
+    .slice(0, 200)
+    .map((name) => ({
+      label: name,
+      kind: monaco.languages.CompletionItemKind.Module,
+      insertText: name,
+      range: {
+        startLineNumber: position.lineNumber,
+        startColumn,
+        endLineNumber: position.lineNumber,
+        endColumn: position.column
+      }
+    }));
+}
+
 function toMonacoRange(monaco, range) {
   if (!range?.start || !range?.end) {
     return undefined;
@@ -223,6 +339,11 @@ function simplifyLspServerMessage(raw, language) {
   let match = line.match(/^Pyright language server ([0-9.]+) starting$/);
   if (match) {
     return `  server: pyright ${match[1]}`;
+  }
+
+  match = line.match(/^basedpyright language server ([0-9.]+) starting$/i);
+  if (match) {
+    return `  server: basedpyright ${match[1]}`;
   }
 
   match = line.match(/^initializing,\s*csharp-ls version\s+(.+)$/i);
@@ -703,6 +824,36 @@ export class LSPClient {
   }
 
   registerProviders(capabilities = {}) {
+    const importCompletionDisposable = this.monaco.languages.registerCompletionItemProvider(
+      this.languageId,
+      {
+        triggerCharacters: ['"', "'", '.', '/'],
+        provideCompletionItems: async (model, position) => {
+          if (model !== this.model) {
+            return { suggestions: [] };
+          }
+
+          const context = getImportSuggestionContext(this.language, model, position);
+          if (!context) {
+            return { suggestions: [] };
+          }
+
+          const packages = await fetchImportSuggestions(this.language, {
+            mode: context.mode,
+            module: context.moduleName
+          });
+          return {
+            suggestions: buildImportSuggestions(
+              this.monaco,
+              packages,
+              context.prefix,
+              position
+            )
+          };
+        }
+      }
+    );
+
     const completionDisposable = this.monaco.languages.registerCompletionItemProvider(this.languageId, {
       triggerCharacters: ['.', '>', ':'],
       provideCompletionItems: async (model, position) => {
@@ -808,7 +959,7 @@ export class LSPClient {
       }
     });
 
-    this.disposables.push(completionDisposable, hoverDisposable);
+    this.disposables.push(importCompletionDisposable, completionDisposable, hoverDisposable);
 
     const semanticProvider = capabilities.semanticTokensProvider;
     const legend = semanticProvider?.legend;

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -224,8 +224,8 @@ async function runWithSandboxQueue(runFn, { onQueueEvent = null, runControl = nu
 
 const LSP_CANDIDATES = {
   python: [
-    { cmd: 'pyright-langserver', args: ['--stdio'] },
     { cmd: 'basedpyright-langserver', args: ['--stdio'] },
+    { cmd: 'pyright-langserver', args: ['--stdio'] },
     { cmd: 'pylsp', args: [] }
   ],
   c: [{ cmd: 'clangd', args: ['--background-index'] }],
@@ -312,6 +312,231 @@ const RUNTIME_PROBE_COMMAND = {
   kotlin: 'kotlinc -version 2>&1 | head -n 1',
   dart: 'dart --version 2>&1 | head -n 1'
 };
+const IMPORT_SUGGESTION_CACHE = new Map();
+
+function readLines(output = '') {
+  return String(output)
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function listWorkspaceNodePackages() {
+  const results = new Set();
+
+  const packageJsonPath = path.join(LSP_WORKSPACE_DIR, 'package.json');
+  if (existsSync(packageJsonPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+      ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'].forEach((field) => {
+        const deps = pkg?.[field];
+        if (deps && typeof deps === 'object') {
+          Object.keys(deps).forEach((name) => results.add(name));
+        }
+      });
+    } catch {
+      // Ignore malformed package.json.
+    }
+  }
+
+  const nodeModulesPath = path.join(LSP_WORKSPACE_DIR, 'node_modules');
+  if (existsSync(nodeModulesPath)) {
+    try {
+      for (const entry of readdirSync(nodeModulesPath)) {
+        if (!entry || entry.startsWith('.')) {
+          continue;
+        }
+        if (entry.startsWith('@')) {
+          const scopedDir = path.join(nodeModulesPath, entry);
+          for (const sub of readdirSync(scopedDir)) {
+            if (sub && !sub.startsWith('.')) {
+              results.add(`${entry}/${sub}`);
+            }
+          }
+          continue;
+        }
+        results.add(entry);
+      }
+    } catch {
+      // Ignore node_modules scan failures.
+    }
+  }
+
+  return Array.from(results).sort();
+}
+
+function listImportPackages(language) {
+  const cacheKey = `${language}:packages`;
+  const cached = IMPORT_SUGGESTION_CACHE.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  let result = [];
+
+  if (language === 'python') {
+    const probe = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import pkgutil',
+          'mods = sorted({m.name.split(".")[0] for m in pkgutil.iter_modules()})',
+          'print("\\n".join(mods))'
+        ].join('; ')
+      ],
+      { encoding: 'utf8' }
+    );
+    if (probe.status === 0) {
+      result = readLines(probe.stdout);
+    }
+  } else if (language === 'nodejs') {
+    const probe = spawnSync(
+      'node',
+      [
+        '-e',
+        [
+          'const fs = require("fs");',
+          'const path = require("path");',
+          'const cp = require("child_process");',
+          'const { builtinModules } = require("module");',
+          'const mods = new Set(builtinModules.map((name) => name.replace(/^node:/, "")));',
+          'try {',
+          '  const root = cp.execSync("npm root -g", { encoding: "utf8" }).trim();',
+          '  for (const entry of fs.readdirSync(root)) {',
+          '    if (!entry || entry.startsWith(".")) continue;',
+          '    if (entry.startsWith("@")) {',
+          '      for (const sub of fs.readdirSync(path.join(root, entry))) {',
+          '        mods.add(`${entry}/${sub}`);',
+          '      }',
+          '      continue;',
+          '    }',
+          '    mods.add(entry);',
+          '  }',
+          '} catch {}',
+          'console.log(Array.from(mods).sort().join("\\n"));'
+        ].join(' ')
+      ],
+      { encoding: 'utf8' }
+    );
+    if (probe.status === 0) {
+      result = Array.from(new Set([...readLines(probe.stdout), ...listWorkspaceNodePackages()])).sort();
+    }
+  } else if (language === 'go') {
+    const probe = spawnSync('go', ['list', 'std'], { encoding: 'utf8' });
+    if (probe.status === 0) {
+      result = readLines(probe.stdout);
+    }
+  } else if (language === 'java') {
+    const javaHome = process.env.JAVA_HOME || '/opt/java/jdk-21';
+    const modulesPath = path.join(javaHome, 'lib', 'modules');
+    const probe = spawnSync(
+      'sh',
+      [
+        '-lc',
+        [
+          `[ -f "${modulesPath}" ] || exit 0`,
+          `jimage list "${modulesPath}" 2>/dev/null`,
+          `| grep '\\.class$'`,
+          `| grep -v 'module-info\\.class$'`,
+          `| sed 's#^/##'`,
+          `| sed 's#/#.#g'`,
+          `| sed 's#\\.class$##'`,
+          `| sed '/\\$/{d;}'`
+        ].join(' ')
+      ],
+      { encoding: 'utf8' }
+    );
+    if (probe.status === 0) {
+      const classes = readLines(probe.stdout);
+      const names = new Set(classes);
+      for (const className of classes) {
+        const parts = className.split('.');
+        for (let i = 1; i < parts.length; i += 1) {
+          names.add(parts.slice(0, i).join('.'));
+        }
+      }
+      result = Array.from(names).sort();
+    }
+  } else if (language === 'csharp') {
+    const probe = spawnSync(
+      'sh',
+      [
+        '-lc',
+        [
+          'find /usr/share/dotnet /usr/lib/mono \\( -name "*.dll" -o -name "*.exe" \\) 2>/dev/null',
+          '| head -n 400',
+          '| xargs -r strings -n 8 2>/dev/null',
+          `| grep -E '^[A-Z][A-Za-z0-9_]*(\\.[A-Z][A-Za-z0-9_]*)+$'`,
+          `| grep -vE '\\.(resources|XmlSerializers)$'`,
+          '| sort -u'
+        ].join(' ')
+      ],
+      { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }
+    );
+    if (probe.status === 0) {
+      result = readLines(probe.stdout);
+    } else {
+      result = [
+        'System',
+        'System.Collections.Generic',
+        'System.IO',
+        'System.Linq',
+        'System.Net.Http',
+        'System.Text',
+        'System.Threading',
+        'System.Threading.Tasks'
+      ];
+    }
+  }
+
+  IMPORT_SUGGESTION_CACHE.set(cacheKey, result);
+  return result;
+}
+
+function listPythonModuleSymbols(moduleName) {
+  if (!moduleName) {
+    return [];
+  }
+  const cacheKey = `python:members:${moduleName}`;
+  const cached = IMPORT_SUGGESTION_CACHE.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const probe = spawnSync(
+    'python3',
+    [
+      '-c',
+      [
+        'import importlib, json, pkgutil, sys',
+        `module_name = ${JSON.stringify(moduleName)}`,
+        'mod = importlib.import_module(module_name)',
+        'names = {name for name in dir(mod) if not name.startswith("_")}',
+        'module_path = getattr(mod, "__path__", None)',
+        'if module_path:',
+        '  names.update({item.name for item in pkgutil.iter_modules(module_path)})',
+        'print(json.dumps(sorted(names)))'
+      ].join('; ')
+    ],
+    { encoding: 'utf8' }
+  );
+
+  let result = [];
+  if (probe.status === 0) {
+    try {
+      const parsed = JSON.parse(probe.stdout || '[]');
+      if (Array.isArray(parsed)) {
+        result = parsed.filter((item) => typeof item === 'string');
+      }
+    } catch {
+      result = [];
+    }
+  }
+
+  IMPORT_SUGGESTION_CACHE.set(cacheKey, result);
+  return result;
+}
 
 function buildDockerSandboxCommand(language) {
   const spec = DOCKER_RUN_SPEC[language];
@@ -1448,6 +1673,37 @@ function appendRuntimeDiagnostic(stderr, result) {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, at: new Date().toISOString() });
+});
+
+app.get('/api/import-packages/:language', (req, res) => {
+  const language = String(req.params.language || '').trim();
+  if (!SUPPORTED_LANGUAGES.includes(language)) {
+    res.status(400).json({ error: 'unsupported language' });
+    return;
+  }
+
+  try {
+    const mode = String(req.query.mode || 'packages').trim();
+    const moduleName = String(req.query.module || '').trim();
+
+    if (mode === 'python-members') {
+      if (language !== 'python' || !moduleName) {
+        res.status(400).json({ error: 'python module is required' });
+        return;
+      }
+      res.json({ items: listPythonModuleSymbols(moduleName) });
+      return;
+    }
+
+    if (mode !== 'packages') {
+      res.status(400).json({ error: 'unsupported import suggestion mode' });
+      return;
+    }
+
+    res.json({ items: listImportPackages(language) });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to list import packages' });
+  }
 });
 
 app.post('/api/run', async (req, res) => {

@@ -99,7 +99,7 @@ const WORKSPACE_RESIZER_MIN_SIDE_PX = 280;
 const WORKSPACE_RESIZER_MIN_EDITOR_HEIGHT_PX = 260;
 const WORKSPACE_RESIZER_MIN_SIDE_HEIGHT_PX = 220;
 const RESIZER_HEIGHT_PX = 8;
-const DEFAULT_PANEL_RATIOS = [0.26, 0.46, 0.28];
+const DEFAULT_PANEL_RATIOS = [0.26, 0.62, 0.12];
 const MIN_PANEL_HEIGHT_PX = 96;
 const LEGACY_CSHARP_STARTER =
   `using System;\n\npublic class Main {\n    public static void Main(string[] args) {\n        Console.WriteLine(\"Hello, C#\");\n    }\n}\n`;
@@ -318,26 +318,51 @@ function defineDarkModernTheme(monaco) {
     inherit: true,
     rules: [
       { token: 'comment', foreground: '6A9955' },
-      { token: 'keyword', foreground: '569CD6' },
+      { token: 'keyword', foreground: 'C586C0' },
+      { token: 'keyword.control', foreground: 'C586C0' },
+      { token: 'operator', foreground: 'C586C0' },
       { token: 'string', foreground: 'CE9178' },
+      { token: 'stringLiteral', foreground: 'CE9178' },
       { token: 'number', foreground: 'B5CEA8' },
+      { token: 'numberLiteral', foreground: 'B5CEA8' },
+      { token: 'namespace', foreground: '4EC9B0' },
+      { token: 'module', foreground: '4EC9B0' },
+      { token: 'module.defaultLibrary', foreground: '4EC9B0' },
+      { token: 'type', foreground: '4EC9B0' },
       { token: 'type.identifier', foreground: '4EC9B0' },
+      { token: 'class', foreground: '4EC9B0' },
+      { token: 'class.defaultLibrary', foreground: '4EC9B0' },
+      { token: 'struct', foreground: '4EC9B0' },
+      { token: 'type.defaultLibrary', foreground: '4EC9B0' },
+      { token: 'templateType', foreground: '4EC9B0' },
+      { token: 'templateType.defaultLibrary', foreground: '4EC9B0' },
+      { token: 'variable', foreground: '9CDCFE' },
+      { token: 'parameter', foreground: '9CDCFE' },
+      { token: 'property', foreground: '9CDCFE' },
+      { token: 'enumMember', foreground: '4FC1FF' },
+      { token: 'variable.readonly', foreground: '4FC1FF' },
+      { token: 'variable.defaultLibrary', foreground: '4FC1FF' },
+      { token: 'newOperator', foreground: 'C586C0' },
+      { token: 'customLiteral', foreground: 'DCDCAA' },
       { token: 'function', foreground: 'DCDCAA' },
       { token: 'method', foreground: 'DCDCAA' },
       { token: 'entity.name.function', foreground: 'DCDCAA' },
       { token: 'support.function', foreground: 'DCDCAA' }
     ],
     colors: {
-      'editor.background': '#1f1f1f',
-      'editor.foreground': '#cccccc',
-      'editor.lineHighlightBackground': '#2a2d2e',
-      'editor.selectionBackground': '#264f78',
-      'editor.inactiveSelectionBackground': '#3a3d41',
-      'editorCursor.foreground': '#aeafad',
-      'editorLineNumber.foreground': '#858585',
-      'editorLineNumber.activeForeground': '#c6c6c6',
+      'editor.background': '#1F1F1F',
+      'editor.foreground': '#CCCCCC',
+      'editor.findMatchBackground': '#9E6A03',
+      'editor.lineHighlightBackground': '#2A2D2E',
+      'editor.selectionBackground': '#26477866',
+      'editor.inactiveSelectionBackground': '#3A3D4166',
+      'editorCursor.foreground': '#CCCCCC',
+      'editorLineNumber.foreground': '#6E7681',
+      'editorLineNumber.activeForeground': '#CCCCCC',
       'editorIndentGuide.background1': '#404040',
-      'editorIndentGuide.activeBackground1': '#707070'
+      'editorIndentGuide.activeBackground1': '#707070',
+      'editorWidget.background': '#202020',
+      'editorOverviewRuler.border': '#010409'
     }
   });
 }

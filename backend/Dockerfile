@@ -45,7 +45,7 @@ RUN case "$TARGETARCH" in \
 ENV JAVA_HOME=/opt/java/jdk-21
 ENV PATH="/usr/local/go/bin:${JAVA_HOME}/bin:${PATH}"
 
-RUN npm install -g typescript-language-server typescript
+RUN npm install -g typescript-language-server typescript basedpyright
 RUN GOTOOLCHAIN=auto GOBIN=/usr/local/bin go install golang.org/x/tools/gopls@latest
 
 ARG TARGETARCH
