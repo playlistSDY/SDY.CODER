@@ -466,7 +466,6 @@ function defineDarkModernTheme(monaco) {
 }
 
 export default function App() {
-  const initialGuestWorkspace = loadGuestWorkspace();
   const [language, setLanguage] = useState(() => loadLastLanguage());
   const [stdinText, setStdinText] = useState('');
   const [output, setOutput] = useState('');
@@ -475,8 +474,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [user, setUser] = useState(null);
   const [googleClientId, setGoogleClientId] = useState('');
-  const [files, setFiles] = useState(() => initialGuestWorkspace.files);
-  const [selectedFileId, setSelectedFileId] = useState(() => initialGuestWorkspace.selectedFileId);
+  const [files, setFiles] = useState([]);
+  const [selectedFileId, setSelectedFileId] = useState(null);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [loginPromptOpen, setLoginPromptOpen] = useState(false);
   const [createFileModalOpen, setCreateFileModalOpen] = useState(false);
@@ -871,6 +870,44 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const flushOnPageHide = () => {
+      if (!selectedFile) {
+        return;
+      }
+      const hasPendingSave = saveTimersRef.current.has(selectedFile.id) || stdinSaveTimersRef.current.has(selectedFile.id);
+      if (!hasPendingSave) {
+        return;
+      }
+      const model = modelsRef.current.get(selectedFile.id);
+      const content = model?.getValue?.() ?? selectedFile.content ?? '';
+      const payload = JSON.stringify({ content, stdin: stdinText });
+      saveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      saveTimersRef.current.clear();
+      stdinSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      stdinSaveTimersRef.current.clear();
+
+      if (!user) {
+        setFiles((prev) => prev.map((file) => (file.id === selectedFile.id ? { ...file, content, stdin: stdinText } : file)));
+        return;
+      }
+
+      fetch(`/api/files/${selectedFile.id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+      }).catch(() => {});
+    };
+
+    window.addEventListener('pagehide', flushOnPageHide);
+    return () => window.removeEventListener('pagehide', flushOnPageHide);
+  }, [user, selectedFile, stdinText]);
+
+  useEffect(() => {
+    if (authLoading) {
+      return;
+    }
     if (!user) {
       const guestWorkspace = loadGuestWorkspace();
       setFiles(guestWorkspace.files);
@@ -900,14 +937,14 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [authLoading, user]);
 
   useEffect(() => {
-    if (user) {
+    if (authLoading || user) {
       return;
     }
     saveGuestWorkspace(files, selectedFileId);
-  }, [user, files, selectedFileId]);
+  }, [authLoading, user, files, selectedFileId]);
 
   useEffect(() => {
     if (!googleClientId || user || !explorerOpen) {
