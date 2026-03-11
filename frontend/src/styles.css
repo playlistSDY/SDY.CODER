@@ -266,11 +266,11 @@ body,
 
 .explorer-rail {
   display: flex;
-  flex: 0 0 112px;
+  flex: 0 0 60px;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  min-width: 112px;
+  min-width: 60px;
   margin-right: 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -287,23 +287,30 @@ body,
 
 .explorer-rail-files {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex: 1 1 auto;
   width: 100%;
+  justify-content: center;
 }
 
 .explorer-rail-file {
   width: 100%;
   border: 1px solid #3a3a3a;
   border-radius: 8px;
-  padding: 8px 6px;
+  min-height: 160px;
+  padding: 8px 0;
   background: transparent;
   color: var(--text-dim);
-  text-align: left;
+  text-align: center;
   font-size: 11px;
   line-height: 1.3;
-  word-break: break-word;
   cursor: pointer;
+}
+
+.explorer-rail-file-label {
+  display: inline-block;
+  transform: rotate(90deg);
+  transform-origin: center;
+  white-space: nowrap;
 }
 
 .explorer-rail-file.active {

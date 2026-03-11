@@ -2002,17 +2002,15 @@ export default function App() {
               <div className="explorer-avatar explorer-avatar-placeholder explorer-rail-avatar">?</div>
             )}
             <div className="explorer-rail-files">
-              {files.map((file) => (
+              {selectedFile ? (
                 <button
                   type="button"
-                  key={file.id}
-                  className={`explorer-rail-file${file.id === selectedFileId ? ' active' : ''}`}
-                  onClick={() => setSelectedFileId(file.id)}
-                  title={file.name}
+                  className="explorer-rail-file active"
+                  title={selectedFile.name}
                 >
-                  {file.name}
+                  <span className="explorer-rail-file-label">{selectedFile.name}</span>
                 </button>
-              ))}
+              ) : null}
             </div>
           </aside>
         ) : null}
