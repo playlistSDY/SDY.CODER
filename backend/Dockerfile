@@ -28,6 +28,8 @@ RUN apt-get update \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+RUN python3 -m pip install --break-system-packages --no-cache-dir "python-lsp-server[all]"
+
 COPY --from=golang_toolchain /usr/local/go /usr/local/go
 
 ARG TARGETARCH

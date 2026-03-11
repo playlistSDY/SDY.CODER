@@ -296,13 +296,6 @@ function buildStatusBlock(
       : 'Code execution time: N/A'
   );
 
-  if (typeof sandboxCpuPercent === 'number' || typeof sandboxCpuLimit === 'number') {
-    const usage =
-      typeof sandboxCpuPercent === 'number' ? `${sandboxCpuPercent.toFixed(3)} %` : 'N/A';
-    const limit = typeof sandboxCpuLimit === 'number' ? `${sandboxCpuLimit} vCPU` : 'N/A';
-    lines.push(`CPU usage: ${usage} / max ${limit}`);
-  }
-
   if (typeof sandboxMemoryPeakBytes === 'number' || typeof sandboxMemoryLimitBytes === 'number') {
     lines.push(
       `Memory peak: ${formatBytes(sandboxMemoryPeakBytes)} / max ${formatBytes(sandboxMemoryLimitBytes)}`
@@ -310,6 +303,17 @@ function buildStatusBlock(
   }
 
   return lines.join('\n');
+}
+
+function buildOutputText(statusBlock, stdout = '', stderr = '', error = '') {
+  return [
+    statusBlock,
+    stdout ? `[stdout]\n${stdout}` : '',
+    stderr ? `[stderr]\n${stderr}` : '',
+    error ? `[error]\n${error}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function defineDarkModernTheme(monaco) {
@@ -820,6 +824,8 @@ export default function App() {
       queueFrozen: true
     };
     let finalResult = null;
+    let streamedStdout = '';
+    let streamedStderr = '';
 
     const refreshProgressOutput = () => {
       const now = performance.now();
@@ -832,19 +838,18 @@ export default function App() {
       } else if (progress.phase === 'queue' && !progress.queueFrozen && progress.queueStartedAt) {
         progress.queueWaitMs = Number((now - progress.queueStartedAt).toFixed(3));
       }
-      setOutput(
-        buildStatusBlock(
-          progress.openMs,
-          progress.compileMs,
-          progress.executionMs,
-          null,
-          null,
-          null,
-          null,
-          progress.queueWaitMs,
-          progress.queuePositionAtEnqueue
-        )
+      const statusBlock = buildStatusBlock(
+        progress.openMs,
+        progress.compileMs,
+        progress.executionMs,
+        null,
+        null,
+        null,
+        null,
+        progress.queueWaitMs,
+        progress.queuePositionAtEnqueue
       );
+      setOutput(buildOutputText(statusBlock, streamedStdout, streamedStderr));
     };
 
     const formatQueueLogLine = (queueWaitMs, queuePositionAtEnqueue = null) => {
@@ -1029,6 +1034,18 @@ export default function App() {
             continue;
           }
 
+          if (eventPayload.event === 'stdout' && typeof eventPayload.chunk === 'string') {
+            streamedStdout += eventPayload.chunk;
+            refreshProgressOutput();
+            continue;
+          }
+
+          if (eventPayload.event === 'stderr' && typeof eventPayload.chunk === 'string') {
+            streamedStderr += eventPayload.chunk;
+            refreshProgressOutput();
+            continue;
+          }
+
           if (eventPayload.event === 'run' && typeof eventPayload.runId === 'string') {
             currentRunIdRef.current = eventPayload.runId;
             continue;
@@ -1045,6 +1062,12 @@ export default function App() {
           const eventPayload = JSON.parse(buffer.trim());
           if (eventPayload.event === 'phase') {
             applyPhase(eventPayload.phase, eventPayload.ms, eventPayload);
+          } else if (eventPayload.event === 'stdout' && typeof eventPayload.chunk === 'string') {
+            streamedStdout += eventPayload.chunk;
+            refreshProgressOutput();
+          } else if (eventPayload.event === 'stderr' && typeof eventPayload.chunk === 'string') {
+            streamedStderr += eventPayload.chunk;
+            refreshProgressOutput();
           } else if (eventPayload.event === 'run' && typeof eventPayload.runId === 'string') {
             currentRunIdRef.current = eventPayload.runId;
           } else if (eventPayload.event === 'final') {
@@ -1098,14 +1121,12 @@ export default function App() {
           null
         );
 
-        const failureOutput = [
+        const failureOutput = buildOutputText(
           statusBlock,
-          finalResult.stdout ? `[stdout]\n${finalResult.stdout}` : '',
-          finalResult.stderr ? `[stderr]\n${finalResult.stderr}` : '',
-          finalResult.error ? `[error]\n${finalResult.error}` : ''
-        ]
-          .filter(Boolean)
-          .join('\n\n');
+          finalResult.stdout ?? streamedStdout,
+          finalResult.stderr ?? streamedStderr,
+          finalResult.error
+        );
 
         setOutput(failureOutput || 'Run failed');
         return;
@@ -1123,13 +1144,11 @@ export default function App() {
         null
       );
 
-      const next = [
+      const next = buildOutputText(
         statusBlock,
-        finalResult.stdout ? `[stdout]\n${finalResult.stdout}` : '',
-        finalResult.stderr ? `[stderr]\n${finalResult.stderr}` : ''
-      ]
-        .filter(Boolean)
-        .join('\n\n');
+        finalResult.stdout ?? streamedStdout,
+        finalResult.stderr ?? streamedStderr
+      );
 
       setOutput(next || 'No output');
     } catch (error) {

@@ -226,6 +226,7 @@ const LSP_CANDIDATES = {
   python: [
     { cmd: 'basedpyright-langserver', args: ['--stdio'] },
     { cmd: 'pyright-langserver', args: ['--stdio'] },
+    { cmd: 'python-lsp-server', args: [] },
     { cmd: 'pylsp', args: [] }
   ],
   c: [{ cmd: 'clangd', args: ['--background-index'] }],
@@ -568,7 +569,7 @@ __cpu_start_us=$(awk '/usage_usec/ {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/nu
 __status=$?; \
 __end_ns=$(date +%s%N); \
 __cpu_end_us=$(awk '/usage_usec/ {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0); \
-__wall_us=$(((__end_ns - __opened_ns) / 1000)); \
+__wall_us=$(((__end_ns - __start_ns) / 1000)); \
 if [ "$__wall_us" -gt 0 ]; then __cpu_milli_pct=$(( (__cpu_end_us - __cpu_start_us) * 100000 / __wall_us )); else __cpu_milli_pct=0; fi; \
 __mem_peak_bytes=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null || cat /sys/fs/cgroup/memory.max_usage_in_bytes 2>/dev/null || echo 0); \
 echo "${EXEC_TIME_MARKER}$((__end_ns - __start_ns))" >&2; \
@@ -1160,7 +1161,7 @@ function forceRemoveDockerContainer(containerName) {
 }
 
 async function runInDockerSandbox(language, code, stdinText = '', options = {}) {
-  const { onPhase = null, runControl = null } = options;
+  const { onPhase = null, onStdout = null, onStderr = null, runControl = null } = options;
   const spec = DOCKER_RUN_SPEC[language];
   if (!spec) {
     throw new Error(`Unsupported language for docker sandbox: ${language}`);
@@ -1225,14 +1226,30 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   ];
 
   let phaseBuffer = '';
+  let stderrRelayBuffer = '';
+  let hostContainerOpenMs = null;
+  const dockerRunStartedAt = process.hrtime.bigint();
   const emitPhase = (event) => {
     if (typeof onPhase === 'function' && event?.phase) {
       onPhase(event);
     }
   };
 
+  const emitStdout = (chunk) => {
+    if (typeof onStdout === 'function' && chunk) {
+      onStdout(chunk);
+    }
+  };
+
+  const emitStderr = (chunk) => {
+    if (typeof onStderr === 'function' && chunk) {
+      onStderr(chunk);
+    }
+  };
+
   const parsePhaseChunks = (chunk) => {
     phaseBuffer += chunk;
+    stderrRelayBuffer += chunk;
     while (true) {
       const newlineIdx = phaseBuffer.indexOf('\n');
       if (newlineIdx === -1) {
@@ -1242,8 +1259,36 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
       phaseBuffer = phaseBuffer.slice(newlineIdx + 1);
       const parsed = parsePhaseMarker(line);
       if (parsed) {
+        if (parsed.phase === 'open_done' && hostContainerOpenMs === null) {
+          hostContainerOpenMs = Number(
+            (Number(process.hrtime.bigint() - dockerRunStartedAt) / 1_000_000).toFixed(3)
+          );
+          emitPhase({ ...parsed, ms: hostContainerOpenMs });
+          continue;
+        }
         emitPhase(parsed);
       }
+    }
+
+    while (true) {
+      const newlineIdx = stderrRelayBuffer.indexOf('\n');
+      if (newlineIdx === -1) {
+        break;
+      }
+      const rawLine = stderrRelayBuffer.slice(0, newlineIdx + 1);
+      stderrRelayBuffer = stderrRelayBuffer.slice(newlineIdx + 1);
+      const normalized = rawLine.replace(/\r?\n$/, '');
+      if (
+        normalized.startsWith(PHASE_MARKER) ||
+        normalized.startsWith(EXEC_TIME_MARKER) ||
+        normalized.startsWith(OPEN_TIME_MARKER) ||
+        normalized.startsWith(COMPILE_TIME_MARKER) ||
+        normalized.startsWith(SANDBOX_CPU_MARKER) ||
+        normalized.startsWith(SANDBOX_MEM_PEAK_MARKER)
+      ) {
+        continue;
+      }
+      emitStderr(rawLine);
     }
   };
 
@@ -1251,6 +1296,7 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   try {
     result = await runCommand('docker', args, {
       onTimeout: () => forceRemoveDockerContainer(containerName),
+      onStdoutChunk: emitStdout,
       onStderrChunk: parsePhaseChunks,
       runControl
     });
@@ -1263,7 +1309,29 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   if (phaseBuffer) {
     const parsed = parsePhaseMarker(phaseBuffer.replace(/\r$/, ''));
     if (parsed) {
-      emitPhase(parsed);
+      if (parsed.phase === 'open_done' && hostContainerOpenMs === null) {
+        hostContainerOpenMs = Number(
+          (Number(process.hrtime.bigint() - dockerRunStartedAt) / 1_000_000).toFixed(3)
+        );
+        emitPhase({ ...parsed, ms: hostContainerOpenMs });
+      } else {
+        emitPhase(parsed);
+      }
+    }
+  }
+
+  if (stderrRelayBuffer) {
+    const normalized = stderrRelayBuffer.replace(/\r?\n$/, '');
+    if (
+      normalized &&
+      !normalized.startsWith(PHASE_MARKER) &&
+      !normalized.startsWith(EXEC_TIME_MARKER) &&
+      !normalized.startsWith(OPEN_TIME_MARKER) &&
+      !normalized.startsWith(COMPILE_TIME_MARKER) &&
+      !normalized.startsWith(SANDBOX_CPU_MARKER) &&
+      !normalized.startsWith(SANDBOX_MEM_PEAK_MARKER)
+    ) {
+      emitStderr(stderrRelayBuffer);
     }
   }
 
@@ -1272,6 +1340,9 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   }
 
   const cleaned = stripExecutionMarker(result.stdout, result.stderr);
+  if (hostContainerOpenMs !== null) {
+    cleaned.containerOpenMs = hostContainerOpenMs;
+  }
   if (typeof cleaned.containerOpenMs === 'number') {
     logs.push(`  sandbox open time: ${cleaned.containerOpenMs.toFixed(3)} ms`);
   }
@@ -1834,6 +1905,8 @@ app.post('/api/run/stream', async (req, res) => {
   try {
     let result;
     const onPhase = (payload) => sendEvent('phase', payload);
+    const onStdout = (chunk) => sendEvent('stdout', { chunk });
+    const onStderr = (chunk) => sendEvent('stderr', { chunk });
     if (SANDBOX_PROVIDER === 'docker') {
       if (!isDockerSandboxAvailable()) {
         sendEvent('final', {
@@ -1845,7 +1918,7 @@ app.post('/api/run/stream', async (req, res) => {
         return;
       }
       result = await runWithSandboxQueue(
-        () => runInDockerSandbox(language, code, stdin, { onPhase, runControl }),
+        () => runInDockerSandbox(language, code, stdin, { onPhase, onStdout, onStderr, runControl }),
         { onQueueEvent: onPhase, runControl }
       );
     } else {

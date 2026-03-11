@@ -346,6 +346,11 @@ function simplifyLspServerMessage(raw, language) {
     return `  server: basedpyright ${match[1]}`;
   }
 
+  match = line.match(/^pylsp v?([0-9.]+)$/i);
+  if (match) {
+    return `  server: pylsp ${match[1]}`;
+  }
+
   match = line.match(/^initializing,\s*csharp-ls version\s+(.+)$/i);
   if (match) {
     return `  server: csharp-ls ${match[1]}`;
