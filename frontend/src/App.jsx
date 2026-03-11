@@ -2039,7 +2039,9 @@ export default function App() {
         }}
       >
         {explorerOpen ? (
-          <aside className="explorer-pane" ref={explorerPaneRef}>
+          <>
+            {isMobileView ? <div className="explorer-overlay" onClick={() => setExplorerOpen(false)} /> : null}
+            <aside className={`explorer-pane${isMobileView ? ' mobile-drawer' : ''}`} ref={explorerPaneRef}>
             <div className="explorer-header">
               <button type="button" className="explorer-title-button" onClick={() => setExplorerOpen(false)}>
                 Explorer
@@ -2114,7 +2116,8 @@ export default function App() {
                 ))
               )}
             </div>
-          </aside>
+            </aside>
+          </>
         ) : !isMobileView ? (
           <aside className="explorer-rail">
             <button
