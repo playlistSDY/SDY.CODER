@@ -193,6 +193,11 @@ body,
   margin-top: 10px;
 }
 
+.modal-error {
+  padding-top: 0;
+  color: #ff7b72;
+}
+
 .workspace {
   display: flex;
   gap: 0;

@@ -2058,12 +2058,23 @@ app.post('/api/files', requireAuth, (req, res) => {
     res.status(400).json({ error: 'unsupported language' });
     return;
   }
+  if (!rawName) {
+    res.status(400).json({ error: 'file name is required' });
+    return;
+  }
 
   const id = randomUUID();
   const now = nowIso();
-  const name = normalizeFileName(rawName || 'untitled', language);
+  const name = normalizeFileName(rawName, language);
   const content = typeof req.body?.content === 'string' ? req.body.content : getStarterForLanguage(language);
   const stdin = typeof req.body?.stdin === 'string' ? req.body.stdin : '';
+  const existing = db
+    .prepare('SELECT id FROM files WHERE user_id = ? AND name = ? LIMIT 1')
+    .get(req.user.id, name);
+  if (existing) {
+    res.status(409).json({ error: 'file name already exists' });
+    return;
+  }
   db.prepare(
     `INSERT INTO files (id, user_id, name, language, content, stdin, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -2090,10 +2101,22 @@ app.patch('/api/files/:id', requireAuth, (req, res) => {
     return;
   }
 
+  const nextRawName = req.body?.name !== undefined ? String(req.body.name).trim() : null;
+  if (nextRawName !== null && !nextRawName) {
+    res.status(400).json({ error: 'file name is required' });
+    return;
+  }
   const nextName =
-    req.body?.name !== undefined ? normalizeFileName(req.body.name, nextLanguage) : normalizeFileName(current.name, nextLanguage);
+    nextRawName !== null ? normalizeFileName(nextRawName, nextLanguage) : normalizeFileName(current.name, nextLanguage);
   const nextContent = typeof req.body?.content === 'string' ? req.body.content : current.content;
   const nextStdin = typeof req.body?.stdin === 'string' ? req.body.stdin : current.stdin;
+  const existing = db
+    .prepare('SELECT id FROM files WHERE user_id = ? AND name = ? AND id != ? LIMIT 1')
+    .get(req.user.id, nextName, fileId);
+  if (existing) {
+    res.status(409).json({ error: 'file name already exists' });
+    return;
+  }
   const now = nowIso();
   db.prepare(
     `UPDATE files

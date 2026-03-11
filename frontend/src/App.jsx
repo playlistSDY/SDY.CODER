@@ -531,6 +531,9 @@ export default function App() {
   const selectedFileIdRef = useRef(null);
   const selectedFile = files.find((item) => item.id === selectedFileId) || null;
   const activeFile = selectedFile;
+  const normalizedNewFileName = normalizeFileName(newFileName, newFileLanguage);
+  const createNameTaken = files.some((file) => file.name === normalizedNewFileName);
+  const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken;
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -1612,7 +1615,7 @@ export default function App() {
   };
 
   const openCreateFileModal = () => {
-    setNewFileName(DEFAULT_NEW_FILE_BASENAME);
+    setNewFileName('');
     setNewFileLanguage(language);
     setCreateFileModalOpen(true);
   };
@@ -1622,13 +1625,16 @@ export default function App() {
   };
 
   const createFile = async () => {
+    if (!canCreateFile) {
+      return;
+    }
     try {
       let nextFile;
       if (user) {
         const payload = await fetchJson('/api/files', {
           method: 'POST',
           body: JSON.stringify({
-            name: newFileName || DEFAULT_NEW_FILE_BASENAME,
+            name: newFileName,
             language: newFileLanguage,
             content: getStarterForLanguage(newFileLanguage),
             stdin: ''
@@ -1636,7 +1642,7 @@ export default function App() {
         });
         nextFile = payload.file;
       } else {
-        nextFile = createLocalFile(newFileLanguage, newFileName || DEFAULT_NEW_FILE_BASENAME);
+        nextFile = createLocalFile(newFileLanguage, newFileName);
       }
       setFiles((prev) => [nextFile, ...prev]);
       setSelectedFileId(nextFile.id);
@@ -2171,7 +2177,7 @@ export default function App() {
                 className="file-name-input"
                 value={newFileName}
                 onChange={(event) => setNewFileName(event.target.value)}
-                placeholder="untitled"
+                placeholder="File name"
                 autoFocus
               />
               <select
@@ -2190,10 +2196,15 @@ export default function App() {
               <button type="button" className="control-btn secondary-btn" onClick={closeCreateFileModal}>
                 Cancel
               </button>
-              <button type="button" className="control-btn primary-btn" onClick={createFile}>
+              <button type="button" className="control-btn primary-btn" onClick={createFile} disabled={!canCreateFile}>
                 Create
               </button>
             </div>
+            {!newFileName.trim() ? (
+              <div className="confirm-modal-body modal-error">파일 이름을 입력해야 합니다.</div>
+            ) : createNameTaken ? (
+              <div className="confirm-modal-body modal-error">같은 이름의 파일이 이미 있습니다.</div>
+            ) : null}
           </div>
         </div>
       ) : null}
