@@ -1926,7 +1926,7 @@ export default function App() {
               >
                 ‹
               </button>
-              <button type="button" className="control-btn secondary-btn" onClick={openCreateFileModal}>
+              <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
                 +
               </button>
             </div>
