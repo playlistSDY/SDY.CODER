@@ -593,8 +593,8 @@ export default function App() {
   };
 
   const scheduleFileSave = (fileId, content) => {
+    setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file)));
     if (!user) {
-      setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file)));
       return;
     }
     const prev = saveTimersRef.current.get(fileId);
