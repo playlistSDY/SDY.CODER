@@ -488,6 +488,7 @@ export default function App() {
   const [renameFileLanguage, setRenameFileLanguage] = useState(DEFAULT_LANGUAGE);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
+  const [lastSavedAt, setLastSavedAt] = useState(null);
   const [editorStatus, setEditorStatus] = useState({
     lineCount: 0,
     lineNumber: 1,
@@ -545,6 +546,13 @@ export default function App() {
     appendLogWithId(line);
   };
 
+  const markSavedNow = () => {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    setLastSavedAt(`${hh}:${mm}`);
+  };
+
   const fetchJson = async (url, options = {}) => {
     const response = await fetch(url, {
       credentials: 'include',
@@ -579,6 +587,7 @@ export default function App() {
   const persistFilePatch = async (fileId, patch) => {
     if (!user) {
       setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, ...patch } : file)));
+      markSavedNow();
       return;
     }
     await fetchJson(`/api/files/${fileId}`, {
@@ -590,6 +599,7 @@ export default function App() {
         file.id === fileId ? { ...file, ...patch, updatedAt: new Date().toISOString() } : file
       )
     );
+    markSavedNow();
   };
 
   const scheduleFileSave = (fileId, content) => {
@@ -609,6 +619,10 @@ export default function App() {
   };
 
   const scheduleFileStdinSave = (fileId, stdin) => {
+    setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, stdin } : file)));
+    if (!user) {
+      return;
+    }
     const prev = stdinSaveTimersRef.current.get(fileId);
     if (prev) {
       window.clearTimeout(prev);
@@ -618,6 +632,25 @@ export default function App() {
       persistFilePatch(fileId, { stdin }).catch((error) => appendLog(`stdin save failed: ${error.message}`));
     }, 300);
     stdinSaveTimersRef.current.set(fileId, timer);
+  };
+
+  const flushSelectedFileSaves = async () => {
+    if (!selectedFile) {
+      return;
+    }
+    const pendingSave = saveTimersRef.current.get(selectedFile.id);
+    if (pendingSave) {
+      window.clearTimeout(pendingSave);
+      saveTimersRef.current.delete(selectedFile.id);
+    }
+    const pendingStdinSave = stdinSaveTimersRef.current.get(selectedFile.id);
+    if (pendingStdinSave) {
+      window.clearTimeout(pendingStdinSave);
+      stdinSaveTimersRef.current.delete(selectedFile.id);
+    }
+    const model = modelsRef.current.get(selectedFile.id);
+    const content = model?.getValue?.() ?? selectedFile.content ?? '';
+    await persistFilePatch(selectedFile.id, { content, stdin: stdinText });
   };
 
   const ensureModelForFile = (file, editor = editorRef.current, monaco = monacoRef.current) => {
@@ -1192,6 +1225,11 @@ export default function App() {
     if (!activeFile) {
       setOutput('No file selected');
       return;
+    }
+    try {
+      await flushSelectedFileSaves();
+    } catch (error) {
+      appendLog(`pre-run save failed: ${error.message}`);
     }
     let openingTimer = null;
     let openingLogId = null;
@@ -2062,7 +2100,10 @@ export default function App() {
             />
           </div>
           <div className="editor-statusbar">
-            <span>{activeFile ? `${activeFile.name}  |  ${editorStatusLabel}` : editorStatusLabel}</span>
+            <span className="editor-status-left">{lastSavedAt ? `${lastSavedAt} saved` : ''}</span>
+            <span className="editor-status-right">
+              {activeFile ? `${activeFile.name}  |  ${editorStatusLabel}` : editorStatusLabel}
+            </span>
           </div>
         </section>
 

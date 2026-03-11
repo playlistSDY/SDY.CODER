@@ -551,7 +551,7 @@ body,
 .editor-statusbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   min-height: 28px;
   padding: 0 12px;
   border-top: 1px solid #2a2a2a;
@@ -559,6 +559,14 @@ body,
   color: #d4d4d4;
   font-size: 12px;
   font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+}
+
+.editor-status-left {
+  color: #8f8f8f;
+}
+
+.editor-status-right {
+  text-align: right;
 }
 
 .workspace-resizer {
