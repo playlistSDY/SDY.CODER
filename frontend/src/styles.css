@@ -266,6 +266,9 @@ body,
 }
 
 .explorer-header-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 30px;
   min-width: 30px;
   padding: 6px 0;
@@ -780,16 +783,11 @@ body,
     left: 0;
     bottom: 0;
     z-index: 50;
-    width: min(280px, calc(100vw - 56px));
+    width: min(320px, calc(100vw - 40px));
     min-width: 0;
     max-height: none;
     border-radius: 0 12px 12px 0;
     transform: translateX(0);
-  }
-
-  .explorer-pane.mobile-drawer .explorer-header,
-  .explorer-pane.mobile-drawer .explorer-files-header {
-    padding-right: 14px;
   }
 
   .explorer-user {
