@@ -2051,9 +2051,8 @@ export default function App() {
                 className="control-btn secondary-btn explorer-header-btn"
                 onClick={() => setExplorerOpen(false)}
                 title="Collapse explorer"
-                aria-label="Collapse explorer"
               >
-                <span className="explorer-header-btn-label">{'<'}</span>
+                ‹
               </button>
             </div>
             {user ? (
@@ -2085,13 +2084,8 @@ export default function App() {
             )}
             <div className="explorer-files-header">
               <span>FILES</span>
-              <button
-                type="button"
-                className="control-btn secondary-btn explorer-header-btn"
-                onClick={openCreateFileModal}
-                aria-label="New file"
-              >
-                <span className="explorer-header-btn-label">+</span>
+              <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
+                +
               </button>
             </div>
             <div className="explorer-files">
