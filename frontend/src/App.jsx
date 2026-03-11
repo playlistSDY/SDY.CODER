@@ -489,6 +489,7 @@ export default function App() {
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
   const [lastSavedAt, setLastSavedAt] = useState(null);
+  const [saveState, setSaveState] = useState('saved');
   const [editorStatus, setEditorStatus] = useState({
     lineCount: 0,
     lineNumber: 1,
@@ -551,6 +552,7 @@ export default function App() {
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
     setLastSavedAt(`${hh}:${mm}`);
+    setSaveState('saved');
   };
 
   const fetchJson = async (url, options = {}) => {
@@ -585,6 +587,7 @@ export default function App() {
   };
 
   const persistFilePatch = async (fileId, patch) => {
+    setSaveState('saving');
     if (!user) {
       setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, ...patch } : file)));
       markSavedNow();
@@ -604,6 +607,7 @@ export default function App() {
 
   const scheduleFileSave = (fileId, content) => {
     setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file)));
+    setSaveState('unsaved');
     if (!user) {
       return;
     }
@@ -620,6 +624,7 @@ export default function App() {
 
   const scheduleFileStdinSave = (fileId, stdin) => {
     setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, stdin } : file)));
+    setSaveState('unsaved');
     if (!user) {
       return;
     }
@@ -799,6 +804,7 @@ export default function App() {
 
   useEffect(() => {
     setStdinText(selectedFile?.stdin || '');
+    setSaveState('saved');
   }, [selectedFile?.id, selectedFile?.stdin]);
 
   useEffect(() => {
@@ -1909,6 +1915,8 @@ export default function App() {
         editorStatus.selectedChars > 0 ? ` (${editorStatus.selectedChars} selected)` : ''
       }`
     : `Lines ${editorStatus.lineCount}`;
+  const saveStatusLabel =
+    saveState === 'saving' ? 'saving...' : saveState === 'unsaved' ? 'unsaved' : lastSavedAt ? `${lastSavedAt} saved` : '';
 
   return (
     <div className="app-shell">
@@ -2100,7 +2108,7 @@ export default function App() {
             />
           </div>
           <div className="editor-statusbar">
-            <span className="editor-status-left">{lastSavedAt ? `${lastSavedAt} saved` : ''}</span>
+            <span className="editor-status-left">{saveStatusLabel}</span>
             <span className="editor-status-right">
               {activeFile ? `${activeFile.name}  |  ${editorStatusLabel}` : editorStatusLabel}
             </span>
