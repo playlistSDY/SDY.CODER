@@ -3,10 +3,12 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import Database from 'better-sqlite3';
+import { OAuth2Client } from 'google-auth-library';
 import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
@@ -17,6 +19,12 @@ const PORT = Number(process.env.PORT || 3001);
 const RUN_TIMEOUT_MS = Number(process.env.RUN_TIMEOUT_MS || 30000);
 const LSP_WORKSPACE_DIR = path.join(os.tmpdir(), 'web-vscode-workspace');
 const DOCKER_SOCKET_PATH = '/var/run/docker.sock';
+const DATA_DIR = process.env.DATA_DIR || path.join(BACKEND_DIR, 'data');
+const SQLITE_DB_PATH = process.env.SQLITE_DB_PATH || path.join(DATA_DIR, 'app.db');
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-session-secret-change-me';
+const SESSION_COOKIE_NAME = 'sdycoder_session';
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 * 30);
 
 const SANDBOX_PROVIDER = process.env.SANDBOX_PROVIDER || 'docker';
 const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE || 'web-vscode-backend:latest';
@@ -42,6 +50,212 @@ let sandboxActiveContainers = 0;
 let sandboxQueueSeq = 0;
 const sandboxWaitQueue = [];
 const activeRunControls = new Map();
+mkdirSync(path.dirname(SQLITE_DB_PATH), { recursive: true });
+const db = new Database(SQLITE_DB_PATH);
+db.pragma('journal_mode = WAL');
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  google_sub TEXT NOT NULL UNIQUE,
+  email TEXT NOT NULL,
+  name TEXT NOT NULL,
+  avatar_url TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  language TEXT NOT NULL,
+  content TEXT NOT NULL,
+  stdin TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_files_user_id_updated_at ON files(user_id, updated_at DESC);
+`);
+const fileColumns = db.prepare('PRAGMA table_info(files)').all();
+if (!fileColumns.some((column) => column.name === 'stdin')) {
+  db.exec(`ALTER TABLE files ADD COLUMN stdin TEXT NOT NULL DEFAULT ''`);
+}
+
+const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function signSessionId(sessionId) {
+  return createHmac('sha256', SESSION_SECRET).update(sessionId).digest('hex');
+}
+
+function createSignedSessionValue(sessionId) {
+  return `${sessionId}.${signSessionId(sessionId)}`;
+}
+
+function verifySignedSessionValue(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const dotIndex = value.lastIndexOf('.');
+  if (dotIndex <= 0) {
+    return null;
+  }
+  const sessionId = value.slice(0, dotIndex);
+  const signature = value.slice(dotIndex + 1);
+  const expected = signSessionId(sessionId);
+  try {
+    const left = Buffer.from(signature, 'hex');
+    const right = Buffer.from(expected, 'hex');
+    if (left.length !== right.length || !timingSafeEqual(left, right)) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return sessionId;
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const cookies = {};
+  header.split(';').forEach((part) => {
+    const [rawName, ...rest] = part.trim().split('=');
+    if (!rawName || rest.length === 0) {
+      return;
+    }
+    cookies[rawName] = decodeURIComponent(rest.join('='));
+  });
+  return cookies;
+}
+
+function setSessionCookie(res, sessionId) {
+  const signed = createSignedSessionValue(sessionId);
+  const maxAge = Math.floor(SESSION_TTL_MS / 1000);
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(signed)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`
+  );
+}
+
+function clearSessionCookie(res) {
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`
+  );
+}
+
+function getSessionRecord(req) {
+  const cookies = parseCookies(req);
+  const signedValue = cookies[SESSION_COOKIE_NAME];
+  const sessionId = verifySignedSessionValue(signedValue);
+  if (!sessionId) {
+    return null;
+  }
+  const row = db
+    .prepare(
+      `SELECT sessions.id, sessions.user_id, sessions.expires_at, users.email, users.name, users.avatar_url
+       FROM sessions
+       JOIN users ON users.id = sessions.user_id
+       WHERE sessions.id = ?`
+    )
+    .get(sessionId);
+  if (!row) {
+    return null;
+  }
+  if (new Date(row.expires_at).getTime() <= Date.now()) {
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    return null;
+  }
+  return row;
+}
+
+function requireAuth(req, res, next) {
+  const session = getSessionRecord(req);
+  if (!session) {
+    res.status(401).json({ error: 'authentication required' });
+    return;
+  }
+  req.user = {
+    id: session.user_id,
+    email: session.email,
+    name: session.name,
+    avatarUrl: session.avatar_url
+  };
+  req.sessionId = session.id;
+  next();
+}
+
+function languageExists(language) {
+  return SUPPORTED_LANGUAGES.includes(language);
+}
+
+function getStarterForLanguage(language) {
+  switch (language) {
+    case 'python':
+      return `def solve():\n    print("Hello, Python")\n\nif __name__ == "__main__":\n    solve()\n`;
+    case 'c':
+      return `#include <stdio.h>\n\nint main(void) {\n    printf("Hello, C\\n");\n    return 0;\n}\n`;
+    case 'cpp':
+      return `#include <iostream>\n\nint main() {\n    std::cout << "Hello, C++" << std::endl;\n    return 0;\n}\n`;
+    case 'java':
+      return `public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
+    case 'csharp':
+      return `using System;\n\npublic class Program {\n    public static void Main(string[] args) {\n        Console.WriteLine("Hello, C#");\n    }\n}\n`;
+    case 'nodejs':
+      return `function solve() {\n  console.log("Hello, Node.js");\n}\n\nsolve();\n`;
+    case 'go':
+      return `package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("Hello, Go")\n}\n`;
+    case 'kotlin':
+      return `fun main() {\n    println("Hello, Kotlin")\n}\n`;
+    case 'dart':
+      return `void main() {\n  print('Hello, Dart');\n}\n`;
+    default:
+      return '';
+  }
+}
+
+function getFileExtension(language) {
+  return DOCKER_RUN_SPEC[language]?.sourceFile?.split('.').pop() || 'txt';
+}
+
+function sanitizeFileBaseName(raw) {
+  const trimmed = String(raw || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ');
+  return trimmed || 'untitled';
+}
+
+function normalizeFileName(name, language) {
+  const base = sanitizeFileBaseName(name).replace(/\.[^.]+$/, '');
+  return `${base}.${getFileExtension(language)}`;
+}
+
+function serializeUser(user) {
+  if (!user) {
+    return null;
+  }
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    avatarUrl: user.avatarUrl || user.avatar_url || null
+  };
+}
 
 class RunCancelledError extends Error {
   constructor(message = 'Execution cancelled by user') {
@@ -1744,6 +1958,169 @@ function appendRuntimeDiagnostic(stderr, result) {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, at: new Date().toISOString() });
+});
+
+app.get('/api/auth/config', (_req, res) => {
+  res.json({ googleClientId: GOOGLE_CLIENT_ID || null });
+});
+
+app.get('/api/auth/session', (req, res) => {
+  const session = getSessionRecord(req);
+  res.json({ user: session ? serializeUser(session) : null });
+});
+
+app.post('/api/auth/google', async (req, res) => {
+  const idToken = String(req.body?.credential || req.body?.idToken || '').trim();
+  if (!oauthClient || !GOOGLE_CLIENT_ID) {
+    res.status(500).json({ error: 'google oauth is not configured' });
+    return;
+  }
+  if (!idToken) {
+    res.status(400).json({ error: 'idToken is required' });
+    return;
+  }
+
+  try {
+    const ticket = await oauthClient.verifyIdToken({
+      idToken,
+      audience: GOOGLE_CLIENT_ID
+    });
+    const payload = ticket.getPayload();
+    if (!payload?.sub || !payload?.email || !payload?.name) {
+      res.status(400).json({ error: 'invalid google account payload' });
+      return;
+    }
+
+    const userId =
+      db.prepare('SELECT id FROM users WHERE google_sub = ?').get(payload.sub)?.id || randomUUID();
+    const now = nowIso();
+    db.prepare(
+      `INSERT INTO users (id, google_sub, email, name, avatar_url, created_at, updated_at)
+       VALUES (@id, @googleSub, @email, @name, @avatarUrl, @now, @now)
+       ON CONFLICT(google_sub) DO UPDATE SET
+         email = excluded.email,
+         name = excluded.name,
+         avatar_url = excluded.avatar_url,
+         updated_at = excluded.updated_at`
+    ).run({
+      id: userId,
+      googleSub: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      avatarUrl: payload.picture || null,
+      now
+    });
+
+    const sessionId = randomUUID();
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+    db.prepare('INSERT INTO sessions (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
+      .run(sessionId, userId, expiresAt, now);
+    setSessionCookie(res, sessionId);
+
+    res.json({
+      user: serializeUser({
+        id: userId,
+        email: payload.email,
+        name: payload.name,
+        avatarUrl: payload.picture || null
+      })
+    });
+  } catch (error) {
+    res.status(401).json({ error: error.message || 'google authentication failed' });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const session = getSessionRecord(req);
+  if (session) {
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
+  }
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+app.get('/api/files', requireAuth, (req, res) => {
+  const files = db
+    .prepare(
+      `SELECT id, name, language, content, stdin, created_at AS createdAt, updated_at AS updatedAt
+       FROM files
+       WHERE user_id = ?
+       ORDER BY updated_at DESC, created_at DESC`
+    )
+    .all(req.user.id);
+  res.json({ files });
+});
+
+app.post('/api/files', requireAuth, (req, res) => {
+  const language = String(req.body?.language || '').trim();
+  const rawName = String(req.body?.name || '').trim();
+  if (!languageExists(language)) {
+    res.status(400).json({ error: 'unsupported language' });
+    return;
+  }
+
+  const id = randomUUID();
+  const now = nowIso();
+  const name = normalizeFileName(rawName || 'untitled', language);
+  const content = typeof req.body?.content === 'string' ? req.body.content : getStarterForLanguage(language);
+  const stdin = typeof req.body?.stdin === 'string' ? req.body.stdin : '';
+  db.prepare(
+    `INSERT INTO files (id, user_id, name, language, content, stdin, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, req.user.id, name, language, content, stdin, now, now);
+
+  res.status(201).json({
+    file: { id, name, language, content, stdin, createdAt: now, updatedAt: now }
+  });
+});
+
+app.patch('/api/files/:id', requireAuth, (req, res) => {
+  const fileId = String(req.params.id || '').trim();
+  const current = db
+    .prepare('SELECT id, name, language, content, stdin FROM files WHERE id = ? AND user_id = ?')
+    .get(fileId, req.user.id);
+  if (!current) {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+
+  const nextLanguage = req.body?.language ? String(req.body.language).trim() : current.language;
+  if (!languageExists(nextLanguage)) {
+    res.status(400).json({ error: 'unsupported language' });
+    return;
+  }
+
+  const nextName =
+    req.body?.name !== undefined ? normalizeFileName(req.body.name, nextLanguage) : normalizeFileName(current.name, nextLanguage);
+  const nextContent = typeof req.body?.content === 'string' ? req.body.content : current.content;
+  const nextStdin = typeof req.body?.stdin === 'string' ? req.body.stdin : current.stdin;
+  const now = nowIso();
+  db.prepare(
+    `UPDATE files
+     SET name = ?, language = ?, content = ?, stdin = ?, updated_at = ?
+     WHERE id = ? AND user_id = ?`
+  ).run(nextName, nextLanguage, nextContent, nextStdin, now, fileId, req.user.id);
+
+  res.json({
+    file: {
+      id: fileId,
+      name: nextName,
+      language: nextLanguage,
+      content: nextContent,
+      stdin: nextStdin,
+      updatedAt: now
+    }
+  });
+});
+
+app.delete('/api/files/:id', requireAuth, (req, res) => {
+  const fileId = String(req.params.id || '').trim();
+  const result = db.prepare('DELETE FROM files WHERE id = ? AND user_id = ?').run(fileId, req.user.id);
+  if (result.changes === 0) {
+    res.status(404).json({ error: 'file not found' });
+    return;
+  }
+  res.json({ ok: true, id: fileId });
 });
 
 app.get('/api/import-packages/:language', (req, res) => {

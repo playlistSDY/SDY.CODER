@@ -50,6 +50,15 @@ body,
   letter-spacing: 0.2px;
 }
 
+.mobile-menu-btn {
+  display: none;
+  width: 38px;
+  min-width: 38px;
+  padding: 7px 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .brand-logo {
   width: 20px;
   height: 20px;
@@ -62,7 +71,6 @@ body,
   gap: 8px;
 }
 
-.lang-select,
 .run-btn,
 .control-btn {
   border: 1px solid #4a4a4a;
@@ -103,6 +111,16 @@ body,
 
 .danger-btn:hover:enabled {
   background: #d62d3b;
+}
+
+.primary-btn {
+  background: #0e639c;
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.primary-btn:hover:enabled {
+  background: #1177bb;
 }
 
 .run-btn:hover:enabled {
@@ -161,12 +179,310 @@ body,
   padding: 0 16px 16px;
 }
 
+.file-name-input {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  background: #111111;
+  color: var(--text-main);
+  font-size: 14px;
+}
+
+.modal-select {
+  margin-top: 10px;
+}
+
 .workspace {
   display: flex;
   gap: 0;
   flex: 1 1 auto;
   min-height: 0;
   padding: 10px;
+}
+
+.login-error {
+  display: block;
+  margin-top: 8px;
+  color: #ff7b72;
+  font-size: 12px;
+}
+
+.google-login-button {
+  margin-top: 12px;
+}
+
+.explorer-pane {
+  display: flex;
+  flex: 0 0 var(--explorer-width, 220px);
+  flex-direction: column;
+  min-width: var(--explorer-width, 220px);
+  margin-right: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #202020 0%, #181818 100%);
+  overflow: hidden;
+}
+
+.explorer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.explorer-title,
+.explorer-title-button {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.explorer-title-button {
+  flex: 1 1 auto;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+
+.explorer-header-btn {
+  width: 34px;
+  min-width: 34px;
+  padding: 7px 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.explorer-rail {
+  display: flex;
+  flex: 0 0 48px;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 48px;
+  margin-right: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #202020 0%, #181818 100%);
+  padding: 10px 6px;
+}
+
+.explorer-rail-badge,
+.explorer-rail-index,
+.explorer-rail-file {
+  width: 100%;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  padding: 8px 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.explorer-rail-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+.explorer-user {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.explorer-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  object-fit: cover;
+}
+
+.explorer-avatar-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #454545;
+  color: #d8d8d8;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.explorer-user-meta {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.explorer-user-meta span:first-child {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.explorer-auth-btn {
+  width: 100%;
+}
+
+.explorer-user-authenticated {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.explorer-user-authenticated .explorer-auth-btn {
+  flex: 0 0 100%;
+  width: 100%;
+  margin-top: 2px;
+}
+
+.explorer-auth-slot {
+  flex: 0 0 160px;
+  width: 160px;
+  min-width: 160px;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.explorer-user-logged-out {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.explorer-user-logged-out .explorer-auth-slot {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.explorer-login-card {
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 12px;
+  border: 1px solid #343434;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #242424 0%, #1a1a1a 100%);
+  color: var(--text-main);
+  text-align: left;
+}
+
+.explorer-login-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.explorer-login-copy {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.explorer-login-toggle {
+  margin-top: 10px;
+}
+
+.explorer-auth-slot .google-login-button {
+  display: inline-flex;
+  margin-top: 0;
+  width: auto;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent !important;
+}
+
+.explorer-auth-slot .google-login-button > div {
+  display: inline-block !important;
+  width: auto !important;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent !important;
+}
+
+.explorer-auth-slot .google-login-button iframe {
+  background: transparent !important;
+}
+
+.explorer-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.explorer-empty {
+  padding: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.explorer-file-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.explorer-file-row.active {
+  border-radius: 8px;
+  background: rgba(0, 120, 212, 0.14);
+}
+
+.explorer-file {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.explorer-file:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.explorer-file.active {
+  background: rgba(0, 120, 212, 0.22);
+  color: #ffffff;
+}
+
+.explorer-file-action {
+  flex: 0 0 auto;
+  min-width: 30px;
+  border: 1px solid #414141;
+  background: #252525;
+  color: var(--text-dim);
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.explorer-file-action:hover {
+  color: var(--text-main);
+  background: #303030;
 }
 
 .editor-pane {
@@ -216,6 +532,11 @@ body,
   width: 2px;
   border-radius: 2px;
   background: #4a4a4a;
+}
+
+.explorer-resizer {
+  margin-right: 10px;
+  margin-left: 0;
 }
 
 .workspace-resizer:hover::before {
@@ -353,6 +674,12 @@ body,
     font-size: 13px;
   }
 
+  .mobile-menu-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   .brand-logo {
     width: 18px;
     height: 18px;
@@ -363,16 +690,10 @@ body,
     gap: 8px;
   }
 
-  .lang-select,
   .run-btn,
   .control-btn {
     min-height: 40px;
     font-size: 14px;
-  }
-
-  .lang-select {
-    flex: 1 1 auto;
-    min-width: 0;
   }
 
   .run-btn,
@@ -385,6 +706,49 @@ body,
     flex-direction: column;
     gap: 0;
     padding: 8px;
+  }
+
+  .explorer-pane {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    margin-right: 0;
+    margin-bottom: 8px;
+    max-height: 180px;
+  }
+
+  .explorer-user {
+    flex-wrap: wrap;
+  }
+
+  .explorer-auth-slot {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .explorer-auth-slot .google-login-button {
+    width: 100%;
+  }
+
+  .explorer-resizer {
+    display: none;
+  }
+
+  .explorer-rail {
+    flex-direction: row;
+    width: auto;
+    min-width: 0;
+    margin-right: 0;
+    margin-bottom: 8px;
+    padding: 8px 10px;
+  }
+
+  .explorer-rail-badge,
+  .explorer-rail-index,
+  .explorer-rail-file {
+    width: 44px;
+    padding: 7px 0;
   }
 
   .workspace-resizer {

@@ -14,10 +14,15 @@ services:
       SANDBOX_MEMORY_LIMIT: "512m"
       SANDBOX_PIDS_LIMIT: "128"
       JAVA_DEFAULT_CLASSPATH: "/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar"
+      DATA_DIR: "/data"
+      SQLITE_DB_PATH: "/data/app.db"
+      GOOGLE_CLIENT_ID: "121210300536-58p18oet7no98r53d9vch4j4sfh0glea.apps.googleusercontent.com"
+      SESSION_SECRET: "09asd-as8askdjlk-asdasd898-as99ksaldj"
     expose:
       - "3001"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - backend_data:/data
     restart: unless-stopped
 
   frontend:
@@ -31,3 +36,6 @@ services:
     ports:
       - "5403:80"
     restart: unless-stopped
+
+volumes:
+  backend_data:

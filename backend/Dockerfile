@@ -121,7 +121,7 @@ RUN mkdir -p /opt/jdtls /tmp/jdtls-workspace \
   && chmod +x /usr/local/bin/jdtls
 
 COPY backend/package*.json ./
-RUN npm ci
+RUN npm install
 
 COPY backend/src ./src
 

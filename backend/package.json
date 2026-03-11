@@ -8,7 +8,9 @@
     "start": "node src/server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^12.6.2",
     "express": "^5.1.0",
+    "google-auth-library": "^10.6.1",
     "ws": "^8.18.3"
   },
   "devDependencies": {

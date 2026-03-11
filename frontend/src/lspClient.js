@@ -440,6 +440,7 @@ export class LSPClient {
     model,
     onLog,
     isActive = () => true,
+    fileName = null,
     workspaceUri = 'file:///tmp/web-vscode-workspace'
   }) {
     this.monaco = monaco;
@@ -466,8 +467,8 @@ export class LSPClient {
     this.lastLogAt = 0;
     this.semanticTokensEmitter = new this.monaco.Emitter();
 
-    const fileName = FILE_NAME_BY_LANG[language] || `main.${EXT_BY_LANG[language]}`;
-    this.uri = `${this.workspaceUri}/${fileName}`;
+    const resolvedFileName = fileName || FILE_NAME_BY_LANG[language] || `main.${EXT_BY_LANG[language]}`;
+    this.uri = `${this.workspaceUri}/${resolvedFileName}`;
     this.disposables.push(this.semanticTokensEmitter);
   }
 
