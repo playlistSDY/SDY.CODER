@@ -293,6 +293,10 @@ body,
 }
 
 .explorer-rail-file {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   border: 0;
   border-radius: 0;
@@ -307,8 +311,11 @@ body,
 }
 
 .explorer-rail-file-label {
-  display: inline-block;
-  transform: rotate(270deg);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: block;
+  transform: translate(-50%, -50%) rotate(270deg);
   transform-origin: center;
   white-space: nowrap;
 }
