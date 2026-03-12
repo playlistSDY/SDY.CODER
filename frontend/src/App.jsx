@@ -502,6 +502,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [authLoading, setAuthLoading] = useState(true);
+  const [loginInProgress, setLoginInProgress] = useState(false);
   const [user, setUser] = useState(null);
   const [googleClientId, setGoogleClientId] = useState('');
   const [files, setFiles] = useState([]);
@@ -1051,17 +1052,22 @@ export default function App() {
       }
       window.google.accounts.id.initialize({
         client_id: googleClientId,
-        callback: async (response) => {
-          try {
-            const payload = await fetchJson('/api/auth/google', {
-              method: 'POST',
-              body: JSON.stringify({ credential: response.credential })
-            });
-            setUser(payload.user || null);
-            setLoginPromptOpen(false);
-          } catch (error) {
-            appendLog(`login failed: ${error.message}`);
-          }
+        callback: (response) => {
+          setLoginInProgress(true);
+          void (async () => {
+            try {
+              const payload = await fetchJson('/api/auth/google', {
+                method: 'POST',
+                body: JSON.stringify({ credential: response.credential })
+              });
+              setUser(payload.user || null);
+              setLoginPromptOpen(false);
+            } catch (error) {
+              appendLog(`login failed: ${error.message}`);
+            } finally {
+              setLoginInProgress(false);
+            }
+          })();
         }
       });
       const target = document.getElementById('google-login-button');
@@ -2148,10 +2154,11 @@ export default function App() {
                 </div>
                 <div className="explorer-auth-slot">
                   {authLoading ? <span className="explorer-login-copy">Loading...</span> : null}
+                  {!authLoading && loginInProgress ? <span className="explorer-login-copy">로그인 처리중...</span> : null}
                   {!authLoading && !googleClientId ? (
                     <span className="login-error">`GOOGLE_CLIENT_ID`가 설정되지 않았습니다.</span>
                   ) : null}
-                  {googleClientId ? <span id="google-login-button" className="google-login-button" /> : null}
+                  {googleClientId && !loginInProgress ? <span id="google-login-button" className="google-login-button" /> : null}
                 </div>
               </div>
             )}
