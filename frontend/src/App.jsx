@@ -87,6 +87,7 @@ const FILE_NAME_BY_LANG = {
 };
 const COMPILED_LANGUAGES = new Set(['c', 'cpp', 'java', 'csharp', 'go', 'kotlin']);
 const LSP_WORKSPACE_URI = 'file:///tmp/web-vscode-workspace';
+const EMPTY_EDITOR_URI = 'inmemory://model/empty';
 const DEFAULT_LANGUAGE = LANGUAGES[0].id;
 const LAST_LANGUAGE_STORAGE_KEY = 'web-vscode:last-language';
 const GUEST_FILES_STORAGE_KEY = 'web-vscode:guest-files';
@@ -535,6 +536,7 @@ export default function App() {
   const monacoRef = useRef(null);
   const lspRef = useRef(null);
   const modelsRef = useRef(new Map());
+  const emptyModelRef = useRef(null);
   const modelStorageDisposablesRef = useRef([]);
   const sidePaneRef = useRef(null);
   const workspaceResizeDragRef = useRef(null);
@@ -709,11 +711,33 @@ export default function App() {
     return model;
   };
 
+  const ensureEmptyModel = (monaco = monacoRef.current) => {
+    if (!monaco) {
+      return null;
+    }
+    if (emptyModelRef.current && !emptyModelRef.current.isDisposed()) {
+      return emptyModelRef.current;
+    }
+    emptyModelRef.current = monaco.editor.createModel('', 'plaintext', monaco.Uri.parse(EMPTY_EDITOR_URI));
+    return emptyModelRef.current;
+  };
+
   const syncSelectedFileModel = (file, editor = editorRef.current) => {
     if (!file || !editor) {
       return;
     }
     const model = ensureModelForFile(file, editor);
+    if (model && editor.getModel() !== model) {
+      editor.setModel(model);
+      updateEditorStatusFromEditor(editor);
+    }
+  };
+
+  const syncEmptyEditorModel = (editor = editorRef.current, monaco = monacoRef.current) => {
+    if (!editor) {
+      return;
+    }
+    const model = ensureEmptyModel(monaco);
     if (model && editor.getModel() !== model) {
       editor.setModel(model);
       updateEditorStatusFromEditor(editor);
@@ -783,6 +807,8 @@ export default function App() {
     if (activeFile) {
       syncSelectedFileModel(activeFile, editor);
       bootLspForFile(activeFile);
+    } else if (!authLoading && user) {
+      syncEmptyEditorModel(editor, monaco);
     }
 
     modelStorageDisposablesRef.current.push(editor.onDidChangeCursorPosition(() => updateEditorStatusFromEditor(editor)));
@@ -813,6 +839,10 @@ export default function App() {
     stdinSaveTimersRef.current.clear();
     modelsRef.current.forEach((model) => model.dispose());
     modelsRef.current.clear();
+    if (emptyModelRef.current) {
+      emptyModelRef.current.dispose();
+      emptyModelRef.current = null;
+    }
     if (lspRef.current) {
       lspRef.current.stop();
       lspRef.current = null;
@@ -821,11 +851,14 @@ export default function App() {
 
   useEffect(() => {
     if (!activeFile) {
+      if (!authLoading && user) {
+        syncEmptyEditorModel();
+      }
       return;
     }
     syncSelectedFileModel(activeFile);
     bootLspForFile(activeFile);
-  }, [user, selectedFileId, activeFile?.name, activeFile?.language]);
+  }, [authLoading, user, selectedFileId, activeFile?.name, activeFile?.language]);
 
   useEffect(() => {
     setStdinText(selectedFile?.stdin || '');
@@ -1056,6 +1089,10 @@ export default function App() {
       modelStorageDisposablesRef.current = [];
       modelsRef.current.forEach((model) => model.dispose());
       modelsRef.current.clear();
+      if (emptyModelRef.current) {
+        emptyModelRef.current.dispose();
+        emptyModelRef.current = null;
+      }
     };
   }, []);
 
@@ -2162,8 +2199,8 @@ export default function App() {
           <div className="editor-surface">
             <Editor
               height="100%"
-              defaultLanguage="python"
-              defaultValue={LANGUAGES[0].starter}
+              defaultLanguage="plaintext"
+              defaultValue=""
               theme="vscode-dark-modern"
               onMount={onEditorMount}
               options={{
