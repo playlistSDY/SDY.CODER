@@ -155,6 +155,10 @@ function loadGuestWorkspace() {
   try {
     const rawFiles = window.localStorage.getItem(GUEST_FILES_STORAGE_KEY);
     const rawSelectedFileId = window.localStorage.getItem(GUEST_SELECTED_FILE_ID_STORAGE_KEY);
+    if (rawFiles === null) {
+      const fallback = createLocalFile(loadLastLanguage());
+      return { files: [fallback], selectedFileId: fallback.id };
+    }
     const parsedFiles = JSON.parse(rawFiles || '[]');
     const files = Array.isArray(parsedFiles)
       ? parsedFiles
@@ -171,8 +175,7 @@ function loadGuestWorkspace() {
           }))
       : [];
     if (files.length === 0) {
-      const fallback = createLocalFile(loadLastLanguage());
-      return { files: [fallback], selectedFileId: fallback.id };
+      return { files: [], selectedFileId: null };
     }
     const selectedFileId = files.some((file) => file.id === rawSelectedFileId) ? rawSelectedFileId : files[0].id;
     return { files, selectedFileId };
@@ -634,9 +637,17 @@ export default function App() {
   };
 
   const scheduleFileSave = (fileId, content) => {
-    setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file)));
+    const updateFiles = (prev) => prev.map((file) => (file.id === fileId ? { ...file, content } : file));
+    setFiles((prev) => {
+      const nextFiles = updateFiles(prev);
+      if (!user) {
+        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+      }
+      return nextFiles;
+    });
     setSaveState('unsaved');
     if (!user) {
+      markSavedNow();
       return;
     }
     const prev = saveTimersRef.current.get(fileId);
@@ -646,14 +657,22 @@ export default function App() {
     const timer = window.setTimeout(() => {
       saveTimersRef.current.delete(fileId);
       persistFilePatch(fileId, { content }).catch((error) => appendLog(`save failed: ${error.message}`));
-    }, 500);
+    }, 0);
     saveTimersRef.current.set(fileId, timer);
   };
 
   const scheduleFileStdinSave = (fileId, stdin) => {
-    setFiles((prev) => prev.map((file) => (file.id === fileId ? { ...file, stdin } : file)));
+    const updateFiles = (prev) => prev.map((file) => (file.id === fileId ? { ...file, stdin } : file));
+    setFiles((prev) => {
+      const nextFiles = updateFiles(prev);
+      if (!user) {
+        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+      }
+      return nextFiles;
+    });
     setSaveState('unsaved');
     if (!user) {
+      markSavedNow();
       return;
     }
     const prev = stdinSaveTimersRef.current.get(fileId);
@@ -663,7 +682,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       stdinSaveTimersRef.current.delete(fileId);
       persistFilePatch(fileId, { stdin }).catch((error) => appendLog(`stdin save failed: ${error.message}`));
-    }, 300);
+    }, 0);
     stdinSaveTimersRef.current.set(fileId, timer);
   };
 
@@ -1798,7 +1817,13 @@ export default function App() {
       } else {
         nextFile = createLocalFile(newFileLanguage, newFileName);
       }
-      setFiles((prev) => [nextFile, ...prev]);
+      setFiles((prev) => {
+        const nextFiles = [nextFile, ...prev];
+        if (!user) {
+          saveGuestWorkspace(nextFiles, nextFile.id);
+        }
+        return nextFiles;
+      });
       setSelectedFileId(nextFile.id);
       setLanguage(nextFile.language);
       setStdinText(nextFile.stdin || '');
@@ -1848,9 +1873,13 @@ export default function App() {
         modelsRef.current.delete(targetFile.id);
       }
       const nextFiles = files.filter((file) => file.id !== targetFile.id);
+      const nextSelectedFileId = selectedFileId === targetFile.id ? nextFiles[0]?.id || null : selectedFileId;
       setFiles(nextFiles);
+      if (!user) {
+        saveGuestWorkspace(nextFiles, nextSelectedFileId);
+      }
       if (selectedFileId === targetFile.id) {
-        setSelectedFileId(nextFiles[0]?.id || null);
+        setSelectedFileId(nextSelectedFileId);
         setStdinText(nextFiles[0]?.stdin || '');
       }
       closeRenameFileModal();
@@ -1903,7 +1932,13 @@ export default function App() {
       modelsRef.current.set(nextFile.id, replacement);
       oldModel.dispose();
     }
-    setFiles((prev) => prev.map((file) => (file.id === nextFile.id ? nextFile : file)));
+    setFiles((prev) => {
+      const nextFiles = prev.map((file) => (file.id === nextFile.id ? nextFile : file));
+      if (!user) {
+        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+      }
+      return nextFiles;
+    });
     if (selectedFileId === nextFile.id) {
       setLanguage(nextFile.language);
       setStdinText(nextFile.stdin || '');
