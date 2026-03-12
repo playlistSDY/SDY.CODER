@@ -1001,21 +1001,8 @@ dotnet_diagnostic.IDE0005.severity = none
   );
 
   const mainCsPath = path.join(LSP_WORKSPACE_DIR, 'Main.cs');
-  if (!existsSync(mainCsPath)) {
-    await writeFile(
-      mainCsPath,
-      `using System;
-
-public class Program
-{
-    public static void Main(string[] args)
-    {
-        Console.WriteLine("Hello, C#");
-    }
-}
-`,
-      'utf8'
-    );
+  if (existsSync(mainCsPath)) {
+    await rm(mainCsPath, { force: true });
   }
 }
 
