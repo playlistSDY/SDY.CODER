@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -958,6 +958,17 @@ async function persistDocument(uri, text) {
 
 async function ensureLspWorkspaceScaffold(language) {
   if (language === 'go') {
+    const workspaceEntries = await readdir(LSP_WORKSPACE_DIR, { withFileTypes: true }).catch(() => []);
+    for (const entry of workspaceEntries) {
+      if (!entry.isFile()) {
+        continue;
+      }
+      const shouldKeep = entry.name === 'go.mod' || entry.name.endsWith('.go');
+      if (!shouldKeep) {
+        await rm(path.join(LSP_WORKSPACE_DIR, entry.name), { force: true });
+      }
+    }
+
     const goModPath = path.join(LSP_WORKSPACE_DIR, 'go.mod');
     await writeFile(
       goModPath,
