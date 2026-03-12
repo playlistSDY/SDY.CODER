@@ -558,6 +558,9 @@ export default function App() {
   const saveTimersRef = useRef(new Map());
   const stdinSaveTimersRef = useRef(new Map());
   const selectedFileIdRef = useRef(null);
+  const filesRef = useRef([]);
+  const userRef = useRef(null);
+  const stdinTextRef = useRef('');
   const selectedFile = files.find((item) => item.id === selectedFileId) || null;
   const activeFile = selectedFile;
   const hasFiles = files.length > 0;
@@ -605,6 +608,13 @@ export default function App() {
       throw new Error(payload.error || 'Request failed');
     }
     return payload;
+  };
+
+  const clearPendingSaveTimers = () => {
+    saveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    saveTimersRef.current.clear();
+    stdinSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    stdinSaveTimersRef.current.clear();
   };
 
   const updateEditorStatusFromEditor = (editor) => {
@@ -708,6 +718,65 @@ export default function App() {
     const model = modelsRef.current.get(selectedFile.id);
     const content = model?.getValue?.() ?? selectedFile.content ?? '';
     await persistFilePatch(selectedFile.id, { content, stdin: stdinText });
+  };
+
+  const collectPendingFilePatches = () => {
+    const pendingIds = new Set([...saveTimersRef.current.keys(), ...stdinSaveTimersRef.current.keys()]);
+    return Array.from(pendingIds)
+      .map((fileId) => {
+        const file = filesRef.current.find((entry) => entry.id === fileId);
+        if (!file) {
+          return null;
+        }
+        const model = modelsRef.current.get(fileId);
+        return {
+          fileId,
+          content: model?.getValue?.() ?? file.content ?? '',
+          stdin: selectedFileIdRef.current === fileId ? stdinTextRef.current : file.stdin ?? ''
+        };
+      })
+      .filter(Boolean);
+  };
+
+  const flushPendingFileSaves = async () => {
+    const patches = collectPendingFilePatches();
+    if (patches.length === 0) {
+      return;
+    }
+
+    clearPendingSaveTimers();
+
+    if (!userRef.current) {
+      setFiles((prev) => {
+        const nextFiles = prev.map((file) => {
+          const patch = patches.find((entry) => entry.fileId === file.id);
+          return patch ? { ...file, content: patch.content, stdin: patch.stdin } : file;
+        });
+        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        return nextFiles;
+      });
+      markSavedNow();
+      return;
+    }
+
+    setSaveState('saving');
+    await Promise.all(
+      patches.map((patch) =>
+        fetchJson(`/api/files/${patch.fileId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ content: patch.content, stdin: patch.stdin })
+        })
+      )
+    );
+    setFiles((prev) =>
+      prev.map((file) => {
+        const patch = patches.find((entry) => entry.fileId === file.id);
+        return patch
+          ? { ...file, content: patch.content, stdin: patch.stdin, updatedAt: new Date().toISOString() }
+          : file;
+      })
+    );
+    markSavedNow();
   };
 
   const ensureModelForFile = (file, editor = editorRef.current, monaco = monacoRef.current) => {
@@ -859,6 +928,18 @@ export default function App() {
   }, [selectedFileId]);
 
   useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  useEffect(() => {
+    stdinTextRef.current = stdinText;
+  }, [stdinText]);
+
+  useEffect(() => {
     if (selectedFile?.language && selectedFile.language !== language) {
       setLanguage(selectedFile.language);
     }
@@ -887,6 +968,10 @@ export default function App() {
 
   useEffect(() => {
     if (!activeFile) {
+      if (lspRef.current) {
+        lspRef.current.stop();
+        lspRef.current = null;
+      }
       if (!authLoading && user) {
         syncEmptyEditorModel();
       }
@@ -899,7 +984,7 @@ export default function App() {
   useEffect(() => {
     setStdinText(selectedFile?.stdin || '');
     setSaveState('saved');
-  }, [selectedFile?.id, selectedFile?.stdin]);
+  }, [selectedFile?.id]);
 
   useEffect(() => {
     saveExplorerWidth(explorerWidth);
@@ -966,38 +1051,36 @@ export default function App() {
 
   useEffect(() => {
     const flushOnPageHide = () => {
-      if (!selectedFile) {
-        return;
-      }
-      const hasPendingSave = saveTimersRef.current.has(selectedFile.id) || stdinSaveTimersRef.current.has(selectedFile.id);
-      if (!hasPendingSave) {
-        return;
-      }
-      const model = modelsRef.current.get(selectedFile.id);
-      const content = model?.getValue?.() ?? selectedFile.content ?? '';
-      const payload = JSON.stringify({ content, stdin: stdinText });
-      saveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      saveTimersRef.current.clear();
-      stdinSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      stdinSaveTimersRef.current.clear();
-
-      if (!user) {
-        setFiles((prev) => prev.map((file) => (file.id === selectedFile.id ? { ...file, content, stdin: stdinText } : file)));
+      const patches = collectPendingFilePatches();
+      if (patches.length === 0) {
         return;
       }
 
-      fetch(`/api/files/${selectedFile.id}`, {
-        method: 'PATCH',
-        credentials: 'include',
-        keepalive: true,
-        headers: { 'Content-Type': 'application/json' },
-        body: payload
-      }).catch(() => {});
+      clearPendingSaveTimers();
+
+      if (!userRef.current) {
+        const nextFiles = filesRef.current.map((file) => {
+          const patch = patches.find((entry) => entry.fileId === file.id);
+          return patch ? { ...file, content: patch.content, stdin: patch.stdin } : file;
+        });
+        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        return;
+      }
+
+      patches.forEach((patch) => {
+        fetch(`/api/files/${patch.fileId}`, {
+          method: 'PATCH',
+          credentials: 'include',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: patch.content, stdin: patch.stdin })
+        }).catch(() => {});
+      });
     };
 
     window.addEventListener('pagehide', flushOnPageHide);
     return () => window.removeEventListener('pagehide', flushOnPageHide);
-  }, [user, selectedFile, stdinText]);
+  }, []);
 
   useEffect(() => {
     if (authLoading) {
@@ -1788,6 +1871,14 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
+      await flushPendingFileSaves();
+      if (selectedFile) {
+        await flushSelectedFileSaves();
+      }
+    } catch (error) {
+      appendLog(`save failed before logout: ${error.message}`);
+    }
+    try {
       await fetchJson('/api/auth/logout', { method: 'POST', body: JSON.stringify({}) });
     } catch {
       // Ignore logout failures and still clear local state.
@@ -1796,10 +1887,7 @@ export default function App() {
     setRenameFileModalOpen(false);
     setCreateFileModalOpen(false);
     setLoginPromptOpen(false);
-    saveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    saveTimersRef.current.clear();
-    stdinSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-    stdinSaveTimersRef.current.clear();
+    clearPendingSaveTimers();
     modelsRef.current.forEach((model) => model.dispose());
     modelsRef.current.clear();
     if (lspRef.current) {

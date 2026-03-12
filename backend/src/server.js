@@ -960,6 +960,14 @@ async function persistDocument(uri, text) {
   await writeFile(fsPath, text, 'utf8');
 }
 
+async function removePersistedDocument(uri) {
+  const fsPath = uriToWorkspacePath(uri);
+  if (!fsPath) {
+    return;
+  }
+  await rm(fsPath, { force: true });
+}
+
 async function ensureLspWorkspaceScaffold(language, workspaceDir) {
   if (language === 'go') {
     const workspaceEntries = await readdir(workspaceDir, { withFileTypes: true }).catch(() => []);
@@ -1133,6 +1141,9 @@ async function createLspBridge(ws, language) {
         if (changedText !== null) {
           await persistDocument(msg.params?.textDocument?.uri, changedText);
         }
+      }
+      if (msg?.method === 'textDocument/didClose') {
+        await removePersistedDocument(msg.params?.textDocument?.uri);
       }
     } catch {
       // Ignore parse/disk-sync errors and continue forwarding to LSP.
