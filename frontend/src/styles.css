@@ -556,8 +556,40 @@ body,
 }
 
 .editor-surface {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.editor-surface-empty .monaco-editor,
+.editor-surface-empty .monaco-editor-background {
+  opacity: 0.45;
+}
+
+.editor-empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.editor-empty-state-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: #d6d6d6;
+}
+
+.editor-empty-state-body {
+  max-width: 420px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #a7a7a7;
 }
 
 .editor-statusbar {
@@ -674,6 +706,11 @@ body,
   font-size: 12px;
   line-height: 1.45;
   font-family: 'Consolas', 'Monaco', 'Menlo', monospace;
+}
+
+.input-area:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .output-status-block {

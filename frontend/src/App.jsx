@@ -552,6 +552,7 @@ export default function App() {
   const selectedFileIdRef = useRef(null);
   const selectedFile = files.find((item) => item.id === selectedFileId) || null;
   const activeFile = selectedFile;
+  const hasFiles = files.length > 0;
   const normalizedNewFileName = normalizeFileName(newFileName, newFileLanguage);
   const createNameTaken = files.some((file) => file.name === normalizedNewFileName);
   const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken;
@@ -2196,7 +2197,7 @@ export default function App() {
         ) : null}
 
         <section className="editor-pane">
-          <div className="editor-surface">
+          <div className={`editor-surface${!hasFiles ? ' editor-surface-empty' : ''}`}>
             <Editor
               height="100%"
               defaultLanguage="plaintext"
@@ -2216,12 +2217,22 @@ export default function App() {
                 tabCompletion: 'on',
                 snippetSuggestions: 'inline',
                 acceptSuggestionOnEnter: 'on',
+                readOnly: !activeFile,
+                domReadOnly: !activeFile,
                 suggest: {
                   showSnippets: true,
                   snippetsPreventQuickSuggestions: false
                 }
               }}
             />
+            {!hasFiles ? (
+              <div className="editor-empty-state">
+                <div className="editor-empty-state-title">파일이 없습니다</div>
+                <div className="editor-empty-state-body">
+                  Explorer의 <strong>FILES</strong> 헤더 오른쪽 <strong>+</strong> 버튼을 눌러 새 파일을 만드세요.
+                </div>
+              </div>
+            ) : null}
           </div>
           <div className="editor-statusbar">
             <span className="editor-status-left">{saveStatusLabel}</span>
@@ -2249,6 +2260,7 @@ export default function App() {
               <textarea
                 className="input-area"
                 value={stdinText}
+                disabled={!activeFile}
                 onChange={(e) => {
                   const nextValue = e.target.value;
                   setStdinText(nextValue);
