@@ -571,22 +571,80 @@ export class LSPClient {
       this.log(`${this.language} lsp socket error`);
     };
 
-    if (!this.changeDisposable) {
-      this.changeDisposable = this.model.onDidChangeContent(() => {
-        if (!this.isReady) {
-          return;
-        }
-        this.docVersion += 1;
-        this.sendNotification('textDocument/didChange', {
-          textDocument: {
-            uri: this.uri,
-            version: this.docVersion
-          },
-          contentChanges: [{ text: this.model.getValue() }]
-        });
-      });
+    this.bindModelChangeListener();
+  }
 
-      this.disposables.push(this.changeDisposable);
+  bindModelChangeListener() {
+    if (this.changeDisposable) {
+      this.changeDisposable.dispose();
+      this.disposables = this.disposables.filter((entry) => entry !== this.changeDisposable);
+      this.changeDisposable = null;
+    }
+
+    this.changeDisposable = this.model.onDidChangeContent(() => {
+      if (!this.isReady) {
+        return;
+      }
+      this.docVersion += 1;
+      this.sendNotification('textDocument/didChange', {
+        textDocument: {
+          uri: this.uri,
+          version: this.docVersion
+        },
+        contentChanges: [{ text: this.model.getValue() }]
+      });
+    });
+
+    this.disposables.push(this.changeDisposable);
+  }
+
+  switchDocument({ model, fileName = null, languageId = this.languageId, workspaceUri = this.workspaceUri }) {
+    if (!model) {
+      return;
+    }
+
+    const nextWorkspaceUri = String(workspaceUri || this.workspaceUri).replace(/\/+$/, '');
+    const resolvedFileName = fileName || FILE_NAME_BY_LANG[this.language] || `main.${EXT_BY_LANG[this.language]}`;
+    const nextUri = `${nextWorkspaceUri}/${resolvedFileName}`;
+    const sameModel = model === this.model;
+    const sameLanguageId = languageId === this.languageId;
+    const sameUri = nextUri === this.uri;
+
+    if (sameModel && sameLanguageId && sameUri) {
+      return;
+    }
+
+    const previousModel = this.model;
+    const previousUri = this.uri;
+
+    if (this.isReady) {
+      this.sendNotification('textDocument/didClose', {
+        textDocument: { uri: previousUri }
+      });
+      if (previousModel) {
+        this.monaco.editor.setModelMarkers(previousModel, 'lsp', []);
+      }
+    }
+
+    this.model = model;
+    this.languageId = languageId;
+    this.workspaceUri = nextWorkspaceUri;
+    this.uri = nextUri;
+    this.docVersion = 1;
+    if (!sameModel) {
+      this.bindModelChangeListener();
+    }
+
+    if (this.isReady) {
+      this.sendNotification('textDocument/didOpen', {
+        textDocument: {
+          uri: this.uri,
+          languageId: this.languageId,
+          version: this.docVersion,
+          text: this.model.getValue()
+        }
+      });
+      this.semanticTokensEmitter.fire();
     }
   }
 

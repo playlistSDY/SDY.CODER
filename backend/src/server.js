@@ -947,6 +947,10 @@ function uriToWorkspacePath(uri) {
   }
 }
 
+function getLspWorkspaceDir(language) {
+  return path.join(LSP_WORKSPACE_DIR, language);
+}
+
 async function persistDocument(uri, text) {
   const fsPath = uriToWorkspacePath(uri);
   if (!fsPath) {
@@ -956,20 +960,20 @@ async function persistDocument(uri, text) {
   await writeFile(fsPath, text, 'utf8');
 }
 
-async function ensureLspWorkspaceScaffold(language) {
+async function ensureLspWorkspaceScaffold(language, workspaceDir) {
   if (language === 'go') {
-    const workspaceEntries = await readdir(LSP_WORKSPACE_DIR, { withFileTypes: true }).catch(() => []);
+    const workspaceEntries = await readdir(workspaceDir, { withFileTypes: true }).catch(() => []);
     for (const entry of workspaceEntries) {
       if (!entry.isFile()) {
         continue;
       }
       const shouldKeep = entry.name === 'go.mod' || entry.name.endsWith('.go');
       if (!shouldKeep) {
-        await rm(path.join(LSP_WORKSPACE_DIR, entry.name), { force: true });
+        await rm(path.join(workspaceDir, entry.name), { force: true });
       }
     }
 
-    const goModPath = path.join(LSP_WORKSPACE_DIR, 'go.mod');
+    const goModPath = path.join(workspaceDir, 'go.mod');
     await writeFile(
       goModPath,
       `module playground
@@ -985,7 +989,7 @@ go 1.24
     return;
   }
 
-  const editorConfigPath = path.join(LSP_WORKSPACE_DIR, '.editorconfig');
+  const editorConfigPath = path.join(workspaceDir, '.editorconfig');
   await writeFile(
     editorConfigPath,
     `root = true
@@ -996,7 +1000,7 @@ dotnet_diagnostic.IDE0005.severity = none
     'utf8'
   );
 
-  const csprojPath = path.join(LSP_WORKSPACE_DIR, 'Main.csproj');
+  const csprojPath = path.join(workspaceDir, 'Main.csproj');
   await writeFile(
     csprojPath,
     `<Project Sdk="Microsoft.NET.Sdk">
@@ -1011,7 +1015,7 @@ dotnet_diagnostic.IDE0005.severity = none
     'utf8'
   );
 
-  const mainCsPath = path.join(LSP_WORKSPACE_DIR, 'Main.cs');
+  const mainCsPath = path.join(workspaceDir, 'Main.cs');
   if (existsSync(mainCsPath)) {
     await rm(mainCsPath, { force: true });
   }
@@ -1030,7 +1034,9 @@ function extractFullTextFromDidChange(params) {
 }
 
 async function createLspBridge(ws, language) {
-  await ensureLspWorkspaceScaffold(language);
+  const workspaceDir = getLspWorkspaceDir(language);
+  await mkdir(workspaceDir, { recursive: true });
+  await ensureLspWorkspaceScaffold(language, workspaceDir);
 
   const selected = resolveLspCommand(language);
   if (!selected) {
@@ -1054,7 +1060,7 @@ async function createLspBridge(ws, language) {
   }
 
   const child = spawn(selected.resolvedCmd || selected.cmd, selected.args, {
-    cwd: LSP_WORKSPACE_DIR,
+    cwd: workspaceDir,
     stdio: ['pipe', 'pipe', 'pipe']
   });
 

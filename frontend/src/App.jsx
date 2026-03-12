@@ -312,6 +312,10 @@ function getStarterForLanguage(languageId) {
   return LANGUAGES.find((item) => item.id === languageId)?.starter || '';
 }
 
+function getLspWorkspaceUri(languageId) {
+  return `${LSP_WORKSPACE_URI}/${languageId}`;
+}
+
 function getMonacoLanguageForLanguage(languageId) {
   return LANGUAGES.find((item) => item.id === languageId)?.monacoLanguage || languageId;
 }
@@ -787,14 +791,6 @@ export default function App() {
       return;
     }
 
-    const sessionId = lspSessionRef.current + 1;
-    lspSessionRef.current = sessionId;
-
-    if (lspRef.current) {
-      await lspRef.current.stop();
-      lspRef.current = null;
-    }
-
     if (!file) {
       return;
     }
@@ -802,6 +798,25 @@ export default function App() {
     const model = ensureModelForFile(file);
     if (!model) {
       return;
+    }
+
+    const workspaceUri = getLspWorkspaceUri(file.language);
+    if (lspRef.current && lspRef.current.language === file.language) {
+      lspRef.current.switchDocument({
+        model,
+        languageId: model.getLanguageId(),
+        fileName: file.name,
+        workspaceUri
+      });
+      return;
+    }
+
+    const sessionId = lspSessionRef.current + 1;
+    lspSessionRef.current = sessionId;
+
+    if (lspRef.current) {
+      await lspRef.current.stop();
+      lspRef.current = null;
     }
 
     const nextClient = new LSPClient({
@@ -812,7 +827,7 @@ export default function App() {
       fileName: file.name,
       onLog: appendLog,
       isActive: () => lspSessionRef.current === sessionId && lspRef.current === nextClient,
-      workspaceUri: LSP_WORKSPACE_URI
+      workspaceUri
     });
     lspRef.current = nextClient;
     nextClient.start();
