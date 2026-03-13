@@ -368,13 +368,46 @@ function buildJavaStarter(fileName) {
   return `public class ${className} {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
 }
 
+function getCsharpPrimaryTypeName(fileName) {
+  const base = String(fileName || '')
+    .replace(/\.[^.]+$/, '')
+    .trim();
+  const cleaned = base.replace(/[^A-Za-z0-9_]/g, '');
+  if (!cleaned) {
+    return 'Program';
+  }
+  return /^[A-Za-z_]/.test(cleaned) ? cleaned : `Program${cleaned}`;
+}
+
+function buildCsharpStarter(fileName) {
+  const typeName = getCsharpPrimaryTypeName(fileName);
+  return `using System;\n\npublic class ${typeName} {\n    public static void Main(string[] args) {\n        Console.WriteLine("Hello, C#");\n    }\n}\n`;
+}
+
 function syncJavaPrimaryTypeName(code, fileName) {
   if (typeof code !== 'string') {
     return buildJavaStarter(fileName);
   }
   const className = getJavaPrimaryTypeName(fileName);
-  if (/public\s+class\s+[A-Za-z_$][A-Za-z0-9_$]*/.test(code)) {
-    return code.replace(/public\s+class\s+[A-Za-z_$][A-Za-z0-9_$]*/, `public class ${className}`);
+  if (/public\s+(?:class|interface|enum|record)\s+[A-Za-z_$][A-Za-z0-9_$]*/.test(code)) {
+    return code.replace(
+      /public\s+(class|interface|enum|record)\s+[A-Za-z_$][A-Za-z0-9_$]*/,
+      (_, kind) => `public ${kind} ${className}`
+    );
+  }
+  return code;
+}
+
+function syncCsharpPrimaryTypeName(code, fileName) {
+  if (typeof code !== 'string') {
+    return buildCsharpStarter(fileName);
+  }
+  const typeName = getCsharpPrimaryTypeName(fileName);
+  if (/public\s+(?:class|interface|record|struct|enum)\s+[A-Za-z_][A-Za-z0-9_]*/.test(code)) {
+    return code.replace(
+      /public\s+(class|interface|record|struct|enum)\s+[A-Za-z_][A-Za-z0-9_]*/,
+      (_, kind) => `public ${kind} ${typeName}`
+    );
   }
   return code;
 }
@@ -382,6 +415,9 @@ function syncJavaPrimaryTypeName(code, fileName) {
 function getStarterForLanguage(languageId, fileName = null) {
   if (languageId === 'java') {
     return buildJavaStarter(fileName || getFileNameForLanguage(languageId));
+  }
+  if (languageId === 'csharp') {
+    return buildCsharpStarter(fileName || getFileNameForLanguage(languageId));
   }
   return LANGUAGES.find((item) => item.id === languageId)?.starter || '';
 }
@@ -410,8 +446,7 @@ function hasInvalidFileBaseName(name) {
 
 function normalizeLoadedCode(languageId, code) {
   if (languageId === 'csharp' && code === LEGACY_CSHARP_STARTER) {
-    const csharpLang = LANGUAGES.find((item) => item.id === 'csharp');
-    return csharpLang?.starter || code;
+    return buildCsharpStarter(getFileNameForLanguage('csharp'));
   }
   return code;
 }
@@ -913,7 +948,7 @@ export default function App() {
     }
 
     const model = monaco.editor.createModel(
-      file.content || getStarterForLanguage(file.language),
+      file.content || getStarterForLanguage(file.language, file.name),
       getMonacoLanguageForLanguage(file.language),
       getModelUri(monaco, file)
     );
@@ -2327,7 +2362,11 @@ export default function App() {
     const currentContent = currentModel?.getValue?.() ?? targetFile.content ?? '';
     const nextName = normalizeFileName(name, nextLanguage);
     const nextContent =
-      nextLanguage === 'java' ? syncJavaPrimaryTypeName(currentContent, nextName) : currentContent;
+      nextLanguage === 'java'
+        ? syncJavaPrimaryTypeName(currentContent, nextName)
+        : nextLanguage === 'csharp'
+          ? syncCsharpPrimaryTypeName(currentContent, nextName)
+          : currentContent;
     let nextFile;
     if (user) {
       const payload = await fetchJson(`/api/files/${targetFile.id}`, {

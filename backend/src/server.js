@@ -230,7 +230,7 @@ function getStarterForLanguage(language) {
     case 'java':
       return buildJavaStarter();
     case 'csharp':
-      return `using System;\n\npublic class Program {\n    public static void Main(string[] args) {\n        Console.WriteLine("Hello, C#");\n    }\n}\n`;
+      return buildCsharpStarter();
     case 'nodejs':
       return `function solve() {\n  console.log("Hello, Node.js");\n}\n\nsolve();\n`;
     case 'go':
@@ -262,6 +262,22 @@ function getJavaPrimaryTypeName(fileName = 'Main.java') {
 function buildJavaStarter(fileName = 'Main.java') {
   const className = getJavaPrimaryTypeName(fileName);
   return `public class ${className} {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
+}
+
+function getCsharpPrimaryTypeName(fileName = 'Main.cs') {
+  const base = String(fileName || '')
+    .replace(/\.[^.]+$/, '')
+    .trim();
+  const cleaned = base.replace(/[^A-Za-z0-9_]/g, '');
+  if (!cleaned) {
+    return 'Program';
+  }
+  return /^[A-Za-z_]/.test(cleaned) ? cleaned : `Program${cleaned}`;
+}
+
+function buildCsharpStarter(fileName = 'Main.cs') {
+  const typeName = getCsharpPrimaryTypeName(fileName);
+  return `using System;\n\npublic class ${typeName} {\n    public static void Main(string[] args) {\n        Console.WriteLine("Hello, C#");\n    }\n}\n`;
 }
 
 function sanitizeFileBaseName(raw) {
@@ -2137,6 +2153,8 @@ app.post('/api/files', requireAuth, (req, res) => {
       ? req.body.content
       : language === 'java'
         ? buildJavaStarter(name)
+        : language === 'csharp'
+          ? buildCsharpStarter(name)
         : getStarterForLanguage(language);
   const stdin = typeof req.body?.stdin === 'string' ? req.body.stdin : '';
   if (folderId) {
