@@ -556,6 +556,7 @@ export default function App() {
   const [loginInProgress, setLoginInProgress] = useState(false);
   const [user, setUser] = useState(null);
   const [googleClientId, setGoogleClientId] = useState('');
+  const [authConfigLoaded, setAuthConfigLoaded] = useState(false);
   const [files, setFiles] = useState([]);
   const [folders, setFolders] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
@@ -1124,24 +1125,31 @@ export default function App() {
     let cancelled = false;
 
     const bootstrapAuth = async () => {
-      try {
-        const [config, session] = await Promise.all([
-          fetchJson('/api/auth/config'),
-          fetchJson('/api/auth/session')
-        ]);
-        if (cancelled) {
-          return;
-        }
-        setGoogleClientId(config.googleClientId || '');
-        setUser(session.user || null);
-      } catch (error) {
-        if (!cancelled) {
-          appendLog(`auth bootstrap failed: ${error.message}`);
-        }
-      } finally {
-        if (!cancelled) {
-          setAuthLoading(false);
-        }
+      const [configResult, sessionResult] = await Promise.allSettled([
+        fetchJson('/api/auth/config'),
+        fetchJson('/api/auth/session')
+      ]);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (configResult.status === 'fulfilled') {
+        setGoogleClientId(configResult.value.googleClientId || '');
+        setAuthConfigLoaded(true);
+      } else {
+        appendLog(`auth config load failed: ${configResult.reason?.message || 'request failed'}`);
+        setAuthConfigLoaded(false);
+      }
+
+      if (sessionResult.status === 'fulfilled') {
+        setUser(sessionResult.value.user || null);
+      } else {
+        appendLog(`auth session load failed: ${sessionResult.reason?.message || 'request failed'}`);
+      }
+
+      if (!cancelled) {
+        setAuthLoading(false);
       }
     };
 
@@ -2553,8 +2561,11 @@ export default function App() {
                 <div className="explorer-auth-slot">
                   {authLoading ? <span className="explorer-login-copy">Loading...</span> : null}
                   {!authLoading && loginInProgress ? <span className="explorer-login-copy">로그인 처리중...</span> : null}
-                  {!authLoading && !googleClientId ? (
+                  {!authLoading && authConfigLoaded && !googleClientId ? (
                     <span className="login-error">`GOOGLE_CLIENT_ID`가 설정되지 않았습니다.</span>
+                  ) : null}
+                  {!authLoading && !authConfigLoaded ? (
+                    <span className="login-error">로그인 설정을 불러오지 못했습니다. 백엔드를 확인해주세요.</span>
                   ) : null}
                   {googleClientId && !loginInProgress ? <span id="google-login-button" className="google-login-button" /> : null}
                 </div>
