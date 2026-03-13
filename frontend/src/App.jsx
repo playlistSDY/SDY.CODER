@@ -642,6 +642,8 @@ export default function App() {
   const [renameFileName, setRenameFileName] = useState('');
   const [renameFileLanguage, setRenameFileLanguage] = useState(DEFAULT_LANGUAGE);
   const [renameFileError, setRenameFileError] = useState('');
+  const [languageChangeModalOpen, setLanguageChangeModalOpen] = useState(false);
+  const [pendingFileEdit, setPendingFileEdit] = useState(null);
   const [editFolderModalOpen, setEditFolderModalOpen] = useState(false);
   const [editFolderId, setEditFolderId] = useState(null);
   const [editFolderName, setEditFolderName] = useState('');
@@ -2201,10 +2203,17 @@ export default function App() {
 
   const closeRenameFileModal = () => {
     setRenameFileModalOpen(false);
+    setLanguageChangeModalOpen(false);
+    setPendingFileEdit(null);
     setRenameFileId(null);
     setRenameFileName('');
     setRenameFileLanguage(DEFAULT_LANGUAGE);
     setRenameFileError('');
+  };
+
+  const closeLanguageChangeModal = () => {
+    setLanguageChangeModalOpen(false);
+    setPendingFileEdit(null);
   };
 
   const closeEditFolderModal = () => {
@@ -2252,6 +2261,28 @@ export default function App() {
       closeRenameFileModal();
     } catch (error) {
       appendLog(`file delete failed: ${error.message}`);
+    }
+  };
+
+  const submitFileEdit = async ({ resetToStarter = false } = {}) => {
+    const targetFile = files.find((file) => file.id === renameFileId);
+    if (!targetFile) {
+      closeLanguageChangeModal();
+      closeRenameFileModal();
+      return;
+    }
+    try {
+      await saveFileMetadata(targetFile, {
+        name: renameFileName,
+        language: renameFileLanguage,
+        resetToStarter
+      });
+      closeLanguageChangeModal();
+      closeRenameFileModal();
+    } catch (error) {
+      closeLanguageChangeModal();
+      setRenameFileError(error.message || '파일 수정에 실패했습니다.');
+      appendLog(`file update failed: ${error.message}`);
     }
   };
 
@@ -2354,15 +2385,16 @@ export default function App() {
     }
   };
 
-  const saveFileMetadata = async (targetFile, { name, language: nextLanguage }) => {
+  const saveFileMetadata = async (targetFile, { name, language: nextLanguage, resetToStarter = false }) => {
     if (!targetFile) {
       return;
     }
     const currentModel = ensureModelForFile(targetFile);
     const currentContent = currentModel?.getValue?.() ?? targetFile.content ?? '';
     const nextName = normalizeFileName(name, nextLanguage);
-    const nextContent =
-      nextLanguage === 'java'
+    const nextContent = resetToStarter
+      ? getStarterForLanguage(nextLanguage, nextName)
+      : nextLanguage === 'java'
         ? syncJavaPrimaryTypeName(currentContent, nextName)
         : nextLanguage === 'csharp'
           ? syncCsharpPrimaryTypeName(currentContent, nextName)
@@ -2441,16 +2473,16 @@ export default function App() {
       setRenameFileError('같은 이름의 파일이 이미 있습니다.');
       return;
     }
-    try {
-      await saveFileMetadata(targetFile, {
+    if (targetFile.language !== renameFileLanguage) {
+      setPendingFileEdit({
+        fileId: targetFile.id,
         name: renameFileName,
         language: renameFileLanguage
       });
-      closeRenameFileModal();
-    } catch (error) {
-      setRenameFileError(error.message || '파일 수정에 실패했습니다.');
-      appendLog(`file update failed: ${error.message}`);
+      setLanguageChangeModalOpen(true);
+      return;
     }
+    await submitFileEdit({ resetToStarter: false });
   };
 
   const openResetModal = () => {
@@ -3101,6 +3133,36 @@ export default function App() {
               <div className="confirm-modal-body modal-error">같은 이름의 폴더가 이미 있습니다.</div>
             ) : null}
             {createFolderError ? <div className="confirm-modal-body modal-error">{createFolderError}</div> : null}
+          </div>
+        </div>
+      ) : null}
+      {languageChangeModalOpen ? (
+        <div className="modal-backdrop">
+          <div
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="language-change-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="language-change-title">
+              Change Language
+            </div>
+            <div className="confirm-modal-body">
+              코드를 {LANGUAGES.find((item) => item.id === (pendingFileEdit?.language || renameFileLanguage))?.label || '선택한 언어'} 기본 코드로
+              초기화할까요?
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closeLanguageChangeModal}>
+                Cancel
+              </button>
+              <button type="button" className="control-btn secondary-btn" onClick={() => void submitFileEdit({ resetToStarter: false })}>
+                Keep
+              </button>
+              <button type="button" className="control-btn primary-btn" onClick={() => void submitFileEdit({ resetToStarter: true })}>
+                Reset
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
