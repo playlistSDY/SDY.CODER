@@ -477,6 +477,13 @@ body,
   gap: 6px;
 }
 
+.explorer-action-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  object-fit: contain;
+}
+
 .explorer-files-header span {
   font-size: 11px;
   font-weight: 700;

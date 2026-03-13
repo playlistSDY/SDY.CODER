@@ -2575,10 +2575,10 @@ export default function App() {
               <span>FILES</span>
               <div className="explorer-files-actions">
                 <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFolderModal}>
-                  F
+                  <img src="/folder.png" alt="Create folder" className="explorer-action-icon" />
                 </button>
                 <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
-                  +
+                  <img src="/document.png" alt="Create file" className="explorer-action-icon" />
                 </button>
               </div>
             </div>
