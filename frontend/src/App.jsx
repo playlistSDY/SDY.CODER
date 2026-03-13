@@ -3136,36 +3136,6 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      {languageChangeModalOpen ? (
-        <div className="modal-backdrop">
-          <div
-            className="confirm-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="language-change-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="confirm-modal-title" id="language-change-title">
-              Change Language
-            </div>
-            <div className="confirm-modal-body">
-              코드를 {LANGUAGES.find((item) => item.id === (pendingFileEdit?.language || renameFileLanguage))?.label || '선택한 언어'} 기본 코드로
-              초기화할까요?
-            </div>
-            <div className="confirm-modal-actions">
-              <button type="button" className="control-btn secondary-btn" onClick={closeLanguageChangeModal}>
-                Cancel
-              </button>
-              <button type="button" className="control-btn secondary-btn" onClick={() => void submitFileEdit({ resetToStarter: false })}>
-                Keep
-              </button>
-              <button type="button" className="control-btn primary-btn" onClick={() => void submitFileEdit({ resetToStarter: true })}>
-                Reset
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
       {renameFileModalOpen ? (
         <div className="modal-backdrop">
           <div
@@ -3224,6 +3194,36 @@ export default function App() {
               <div className="confirm-modal-body modal-error">같은 이름의 파일이 이미 있습니다.</div>
             ) : null}
             {renameFileError ? <div className="confirm-modal-body modal-error">{renameFileError}</div> : null}
+          </div>
+        </div>
+      ) : null}
+      {languageChangeModalOpen ? (
+        <div className="modal-backdrop">
+          <div
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="language-change-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="language-change-title">
+              Change Language
+            </div>
+            <div className="confirm-modal-body">
+              코드를 {LANGUAGES.find((item) => item.id === (pendingFileEdit?.language || renameFileLanguage))?.label || '선택한 언어'} 기본 코드로
+              초기화할까요?
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closeLanguageChangeModal}>
+                Cancel
+              </button>
+              <button type="button" className="control-btn secondary-btn" onClick={() => void submitFileEdit({ resetToStarter: false })}>
+                Keep
+              </button>
+              <button type="button" className="control-btn primary-btn" onClick={() => void submitFileEdit({ resetToStarter: true })}>
+                Reset
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
