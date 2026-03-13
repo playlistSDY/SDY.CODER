@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS files (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_files_user_id_updated_at ON files(user_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_files_user_id_folder_id ON files(user_id, folder_id);
 CREATE INDEX IF NOT EXISTS idx_folders_user_id_name ON folders(user_id, name);
 `);
 const fileColumns = db.prepare('PRAGMA table_info(files)').all();
@@ -107,6 +106,7 @@ if (!fileColumns.some((column) => column.name === 'stdin')) {
 if (!fileColumns.some((column) => column.name === 'folder_id')) {
   db.exec(`ALTER TABLE files ADD COLUMN folder_id TEXT`);
 }
+db.exec(`CREATE INDEX IF NOT EXISTS idx_files_user_id_folder_id ON files(user_id, folder_id)`);
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
