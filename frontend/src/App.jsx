@@ -330,6 +330,10 @@ function normalizeFileName(name, languageId) {
   return `${base}.${ext}`;
 }
 
+function hasInvalidFileBaseName(name) {
+  return String(name || '').trim().includes('.');
+}
+
 function normalizeLoadedCode(languageId, code) {
   if (languageId === 'csharp' && code === LEGACY_CSHARP_STARTER) {
     const csharpLang = LANGUAGES.find((item) => item.id === 'csharp');
@@ -517,10 +521,12 @@ export default function App() {
   const [createFileModalOpen, setCreateFileModalOpen] = useState(false);
   const [newFileName, setNewFileName] = useState('');
   const [newFileLanguage, setNewFileLanguage] = useState(() => loadLastLanguage());
+  const [createFileError, setCreateFileError] = useState('');
   const [renameFileModalOpen, setRenameFileModalOpen] = useState(false);
   const [renameFileId, setRenameFileId] = useState(null);
   const [renameFileName, setRenameFileName] = useState('');
   const [renameFileLanguage, setRenameFileLanguage] = useState(DEFAULT_LANGUAGE);
+  const [renameFileError, setRenameFileError] = useState('');
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -567,7 +573,11 @@ export default function App() {
   const hasFiles = files.length > 0;
   const normalizedNewFileName = normalizeFileName(newFileName, newFileLanguage);
   const createNameTaken = files.some((file) => file.name === normalizedNewFileName);
-  const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken;
+  const createHasDot = hasInvalidFileBaseName(newFileName);
+  const renameHasDot = hasInvalidFileBaseName(renameFileName);
+  const renameNormalizedFileName = normalizeFileName(renameFileName, renameFileLanguage);
+  const renameNameTaken = files.some((file) => file.id !== renameFileId && file.name === renameNormalizedFileName);
+  const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken && !createHasDot;
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -1912,15 +1922,20 @@ export default function App() {
   const openCreateFileModal = () => {
     setNewFileName('');
     setNewFileLanguage(language);
+    setCreateFileError('');
     setCreateFileModalOpen(true);
   };
 
   const closeCreateFileModal = () => {
+    setCreateFileError('');
     setCreateFileModalOpen(false);
   };
 
   const createFile = async () => {
     if (!canCreateFile) {
+      if (createHasDot) {
+        setCreateFileError('파일 이름에는 . 을 넣을 수 없습니다. 확장자는 언어에 맞게 자동으로 붙습니다.');
+      }
       return;
     }
     try {
@@ -1951,6 +1966,7 @@ export default function App() {
       setStdinText(nextFile.stdin || '');
       closeCreateFileModal();
     } catch (error) {
+      setCreateFileError(error.message || '파일 생성에 실패했습니다.');
       appendLog(`file create failed: ${error.message}`);
     }
   };
@@ -1959,6 +1975,7 @@ export default function App() {
     setRenameFileId(file.id);
     setRenameFileName(file.name.replace(/\.[^.]+$/, ''));
     setRenameFileLanguage(file.language);
+    setRenameFileError('');
     setRenameFileModalOpen(true);
   };
 
@@ -1967,6 +1984,7 @@ export default function App() {
     setRenameFileId(null);
     setRenameFileName('');
     setRenameFileLanguage(DEFAULT_LANGUAGE);
+    setRenameFileError('');
   };
 
   const deleteFile = async () => {
@@ -2078,6 +2096,18 @@ export default function App() {
       closeRenameFileModal();
       return;
     }
+    if (!renameFileName.trim()) {
+      setRenameFileError('파일 이름을 입력해야 합니다.');
+      return;
+    }
+    if (renameHasDot) {
+      setRenameFileError('파일 이름에는 . 을 넣을 수 없습니다. 확장자는 언어에 맞게 자동으로 붙습니다.');
+      return;
+    }
+    if (renameNameTaken) {
+      setRenameFileError('같은 이름의 파일이 이미 있습니다.');
+      return;
+    }
     try {
       await saveFileMetadata(targetFile, {
         name: renameFileName,
@@ -2085,6 +2115,7 @@ export default function App() {
       });
       closeRenameFileModal();
     } catch (error) {
+      setRenameFileError(error.message || '파일 수정에 실패했습니다.');
       appendLog(`file update failed: ${error.message}`);
     }
   };
@@ -2522,7 +2553,12 @@ export default function App() {
               <input
                 className="file-name-input"
                 value={newFileName}
-                onChange={(event) => setNewFileName(event.target.value)}
+                onChange={(event) => {
+                  setNewFileName(event.target.value);
+                  if (createFileError) {
+                    setCreateFileError('');
+                  }
+                }}
                 placeholder="File name"
                 autoFocus
               />
@@ -2548,9 +2584,14 @@ export default function App() {
             </div>
             {!newFileName.trim() ? (
               <div className="confirm-modal-body modal-error">파일 이름을 입력해야 합니다.</div>
+            ) : createHasDot ? (
+              <div className="confirm-modal-body modal-error">
+                파일 이름에는 `.` 을 넣을 수 없습니다. 확장자는 언어에 맞게 자동으로 붙습니다.
+              </div>
             ) : createNameTaken ? (
               <div className="confirm-modal-body modal-error">같은 이름의 파일이 이미 있습니다.</div>
             ) : null}
+            {createFileError ? <div className="confirm-modal-body modal-error">{createFileError}</div> : null}
           </div>
         </div>
       ) : null}
@@ -2570,7 +2611,12 @@ export default function App() {
               <input
                 className="file-name-input"
                 value={renameFileName}
-                onChange={(event) => setRenameFileName(event.target.value)}
+                onChange={(event) => {
+                  setRenameFileName(event.target.value);
+                  if (renameFileError) {
+                    setRenameFileError('');
+                  }
+                }}
                 placeholder="untitled"
                 autoFocus
               />
@@ -2597,6 +2643,16 @@ export default function App() {
                 Save
               </button>
             </div>
+            {!renameFileName.trim() ? (
+              <div className="confirm-modal-body modal-error">파일 이름을 입력해야 합니다.</div>
+            ) : renameHasDot ? (
+              <div className="confirm-modal-body modal-error">
+                파일 이름에는 `.` 을 넣을 수 없습니다. 확장자는 언어에 맞게 자동으로 붙습니다.
+              </div>
+            ) : renameNameTaken ? (
+              <div className="confirm-modal-body modal-error">같은 이름의 파일이 이미 있습니다.</div>
+            ) : null}
+            {renameFileError ? <div className="confirm-modal-body modal-error">{renameFileError}</div> : null}
           </div>
         </div>
       ) : null}
