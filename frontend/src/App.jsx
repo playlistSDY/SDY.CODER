@@ -2641,18 +2641,10 @@ export default function App() {
                         <button
                           type="button"
                           className="explorer-file-action"
-                          title="Create file in folder"
-                          onClick={() => openCreateFileModalForFolder(folder.id)}
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          className="explorer-file-action"
                           title="Edit folder"
                           onClick={() => openEditFolderModal(folder)}
                         >
-                          ✎
+                          <img src="/edit.png" alt="Edit folder" className="explorer-action-icon" />
                         </button>
                       </div>
                       {!collapsedFolderIds.has(folder.id) ? (
