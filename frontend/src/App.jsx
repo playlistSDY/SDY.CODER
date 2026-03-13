@@ -511,6 +511,7 @@ export default function App() {
   const [googleClientId, setGoogleClientId] = useState('');
   const [files, setFiles] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [loginPromptOpen, setLoginPromptOpen] = useState(false);
   const [createFileModalOpen, setCreateFileModalOpen] = useState(false);
@@ -909,6 +910,10 @@ export default function App() {
     defineDarkModernTheme(monaco);
     monaco.editor.setTheme('vscode-dark-modern');
 
+    if (!workspaceReady) {
+      return;
+    }
+
     if (activeFile) {
       syncSelectedFileModel(activeFile, editor);
       bootLspForFile(activeFile);
@@ -967,6 +972,9 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!workspaceReady) {
+      return;
+    }
     if (!activeFile) {
       if (lspRef.current) {
         lspRef.current.stop();
@@ -979,7 +987,7 @@ export default function App() {
     }
     syncSelectedFileModel(activeFile);
     bootLspForFile(activeFile);
-  }, [authLoading, user, selectedFileId, activeFile?.name, activeFile?.language]);
+  }, [workspaceReady, authLoading, user, selectedFileId, activeFile?.name, activeFile?.language]);
 
   useEffect(() => {
     setStdinText(selectedFile?.stdin || '');
@@ -1084,6 +1092,7 @@ export default function App() {
 
   useEffect(() => {
     if (authLoading) {
+      setWorkspaceReady(false);
       return;
     }
     if (!user) {
@@ -1091,9 +1100,11 @@ export default function App() {
       setFiles(guestWorkspace.files);
       setSelectedFileId(guestWorkspace.selectedFileId);
       setLoginPromptOpen(false);
+      setWorkspaceReady(true);
       return;
     }
 
+    setWorkspaceReady(false);
     let cancelled = false;
     const loadFiles = async () => {
       try {
@@ -1110,9 +1121,11 @@ export default function App() {
           }
           return prev && nextFiles.some((file) => file.id === prev) ? prev : nextFiles[0]?.id || null;
         });
+        setWorkspaceReady(true);
       } catch (error) {
         if (!cancelled) {
           appendLog(`file load failed: ${error.message}`);
+          setWorkspaceReady(true);
         }
       }
     };
@@ -2343,34 +2356,41 @@ export default function App() {
 
         <section className="editor-pane">
           <div className={`editor-surface${!hasFiles ? ' editor-surface-empty' : ''}`}>
-            <Editor
-              height="100%"
-              defaultLanguage="plaintext"
-              defaultValue=""
-              theme="vscode-dark-modern"
-              onMount={onEditorMount}
-              options={{
-                minimap: { enabled: false },
-                'semanticHighlighting.enabled': true,
-                fontSize: 14,
-                fontLigatures: true,
-                smoothScrolling: true,
-                automaticLayout: true,
-                tabSize: 4,
-                insertSpaces: true,
-                lineNumbersMinChars: 3,
-                tabCompletion: 'on',
-                snippetSuggestions: 'inline',
-                acceptSuggestionOnEnter: 'on',
-                readOnly: !activeFile,
-                domReadOnly: !activeFile,
-                suggest: {
-                  showSnippets: true,
-                  snippetsPreventQuickSuggestions: false
-                }
-              }}
-            />
-            {!hasFiles ? (
+            {workspaceReady ? (
+              <Editor
+                height="100%"
+                defaultLanguage="plaintext"
+                defaultValue=""
+                theme="vscode-dark-modern"
+                onMount={onEditorMount}
+                options={{
+                  minimap: { enabled: false },
+                  'semanticHighlighting.enabled': true,
+                  fontSize: 14,
+                  fontLigatures: true,
+                  smoothScrolling: true,
+                  automaticLayout: true,
+                  tabSize: 4,
+                  insertSpaces: true,
+                  lineNumbersMinChars: 3,
+                  tabCompletion: 'on',
+                  snippetSuggestions: 'inline',
+                  acceptSuggestionOnEnter: 'on',
+                  readOnly: !activeFile,
+                  domReadOnly: !activeFile,
+                  suggest: {
+                    showSnippets: true,
+                    snippetsPreventQuickSuggestions: false
+                  }
+                }}
+              />
+            ) : (
+              <div className="editor-empty-state">
+                <div className="editor-empty-state-title">워크스페이스 불러오는 중...</div>
+                <div className="editor-empty-state-body">코드와 LSP를 준비하고 있습니다.</div>
+              </div>
+            )}
+            {workspaceReady && !hasFiles ? (
               <div className="editor-empty-state">
                 <div className="editor-empty-state-title">파일이 없습니다</div>
                 <div className="editor-empty-state-body">
