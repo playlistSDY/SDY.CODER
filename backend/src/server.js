@@ -72,24 +72,40 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS files (
+CREATE TABLE IF NOT EXISTS folders (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   name TEXT NOT NULL,
-  language TEXT NOT NULL,
-  content TEXT NOT NULL,
-  stdin TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  folder_id TEXT,
+  language TEXT NOT NULL,
+  content TEXT NOT NULL,
+  stdin TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_files_user_id_updated_at ON files(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_files_user_id_folder_id ON files(user_id, folder_id);
+CREATE INDEX IF NOT EXISTS idx_folders_user_id_name ON folders(user_id, name);
 `);
 const fileColumns = db.prepare('PRAGMA table_info(files)').all();
 if (!fileColumns.some((column) => column.name === 'stdin')) {
   db.exec(`ALTER TABLE files ADD COLUMN stdin TEXT NOT NULL DEFAULT ''`);
+}
+if (!fileColumns.some((column) => column.name === 'folder_id')) {
+  db.exec(`ALTER TABLE files ADD COLUMN folder_id TEXT`);
 }
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
@@ -243,6 +259,13 @@ function sanitizeFileBaseName(raw) {
 function normalizeFileName(name, language) {
   const base = sanitizeFileBaseName(name).replace(/\.[^.]+$/, '');
   return `${base}.${getFileExtension(language)}`;
+}
+
+function normalizeFolderName(name) {
+  return String(name || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ');
 }
 
 function serializeUser(user) {
@@ -2055,20 +2078,32 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 app.get('/api/files', requireAuth, (req, res) => {
-  const files = db
+  const folders = db
     .prepare(
-      `SELECT id, name, language, content, stdin, created_at AS createdAt, updated_at AS updatedAt
-       FROM files
+      `SELECT id, name, created_at AS createdAt, updated_at AS updatedAt
+       FROM folders
        WHERE user_id = ?
-       ORDER BY updated_at DESC, created_at DESC`
+       ORDER BY LOWER(name) ASC, created_at ASC`
     )
     .all(req.user.id);
-  res.json({ files });
+  const files = db
+    .prepare(
+      `SELECT id, name, folder_id AS folderId, language, content, stdin, created_at AS createdAt, updated_at AS updatedAt
+       FROM files
+       WHERE user_id = ?
+       ORDER BY LOWER(name) ASC, created_at ASC`
+    )
+    .all(req.user.id);
+  res.json({ files, folders });
 });
 
 app.post('/api/files', requireAuth, (req, res) => {
   const language = String(req.body?.language || '').trim();
   const rawName = String(req.body?.name || '').trim();
+  const folderId =
+    req.body?.folderId === null || req.body?.folderId === undefined || req.body?.folderId === ''
+      ? null
+      : String(req.body.folderId).trim();
   if (!languageExists(language)) {
     res.status(400).json({ error: 'unsupported language' });
     return;
@@ -2083,27 +2118,34 @@ app.post('/api/files', requireAuth, (req, res) => {
   const name = normalizeFileName(rawName, language);
   const content = typeof req.body?.content === 'string' ? req.body.content : getStarterForLanguage(language);
   const stdin = typeof req.body?.stdin === 'string' ? req.body.stdin : '';
+  if (folderId) {
+    const folder = db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(folderId, req.user.id);
+    if (!folder) {
+      res.status(400).json({ error: 'folder not found' });
+      return;
+    }
+  }
   const existing = db
-    .prepare('SELECT id FROM files WHERE user_id = ? AND name = ? LIMIT 1')
-    .get(req.user.id, name);
+    .prepare('SELECT id FROM files WHERE user_id = ? AND folder_id IS ? AND name = ? LIMIT 1')
+    .get(req.user.id, folderId, name);
   if (existing) {
     res.status(409).json({ error: 'file name already exists' });
     return;
   }
   db.prepare(
-    `INSERT INTO files (id, user_id, name, language, content, stdin, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, req.user.id, name, language, content, stdin, now, now);
+    `INSERT INTO files (id, user_id, name, folder_id, language, content, stdin, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, req.user.id, name, folderId, language, content, stdin, now, now);
 
   res.status(201).json({
-    file: { id, name, language, content, stdin, createdAt: now, updatedAt: now }
+    file: { id, name, folderId, language, content, stdin, createdAt: now, updatedAt: now }
   });
 });
 
 app.patch('/api/files/:id', requireAuth, (req, res) => {
   const fileId = String(req.params.id || '').trim();
   const current = db
-    .prepare('SELECT id, name, language, content, stdin FROM files WHERE id = ? AND user_id = ?')
+    .prepare('SELECT id, name, folder_id AS folderId, language, content, stdin FROM files WHERE id = ? AND user_id = ?')
     .get(fileId, req.user.id);
   if (!current) {
     res.status(404).json({ error: 'file not found' });
@@ -2117,17 +2159,30 @@ app.patch('/api/files/:id', requireAuth, (req, res) => {
   }
 
   const nextRawName = req.body?.name !== undefined ? String(req.body.name).trim() : null;
+  const nextFolderId =
+    req.body?.folderId === undefined
+      ? current.folderId
+      : req.body.folderId === null || req.body.folderId === ''
+        ? null
+        : String(req.body.folderId).trim();
   if (nextRawName !== null && !nextRawName) {
     res.status(400).json({ error: 'file name is required' });
     return;
+  }
+  if (nextFolderId) {
+    const folder = db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(nextFolderId, req.user.id);
+    if (!folder) {
+      res.status(400).json({ error: 'folder not found' });
+      return;
+    }
   }
   const nextName =
     nextRawName !== null ? normalizeFileName(nextRawName, nextLanguage) : normalizeFileName(current.name, nextLanguage);
   const nextContent = typeof req.body?.content === 'string' ? req.body.content : current.content;
   const nextStdin = typeof req.body?.stdin === 'string' ? req.body.stdin : current.stdin;
   const existing = db
-    .prepare('SELECT id FROM files WHERE user_id = ? AND name = ? AND id != ? LIMIT 1')
-    .get(req.user.id, nextName, fileId);
+    .prepare('SELECT id FROM files WHERE user_id = ? AND folder_id IS ? AND name = ? AND id != ? LIMIT 1')
+    .get(req.user.id, nextFolderId, nextName, fileId);
   if (existing) {
     res.status(409).json({ error: 'file name already exists' });
     return;
@@ -2135,14 +2190,15 @@ app.patch('/api/files/:id', requireAuth, (req, res) => {
   const now = nowIso();
   db.prepare(
     `UPDATE files
-     SET name = ?, language = ?, content = ?, stdin = ?, updated_at = ?
+     SET name = ?, folder_id = ?, language = ?, content = ?, stdin = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`
-  ).run(nextName, nextLanguage, nextContent, nextStdin, now, fileId, req.user.id);
+  ).run(nextName, nextFolderId, nextLanguage, nextContent, nextStdin, now, fileId, req.user.id);
 
   res.json({
     file: {
       id: fileId,
       name: nextName,
+      folderId: nextFolderId,
       language: nextLanguage,
       content: nextContent,
       stdin: nextStdin,
@@ -2159,6 +2215,73 @@ app.delete('/api/files/:id', requireAuth, (req, res) => {
     return;
   }
   res.json({ ok: true, id: fileId });
+});
+
+app.post('/api/folders', requireAuth, (req, res) => {
+  const rawName = normalizeFolderName(req.body?.name);
+  if (!rawName) {
+    res.status(400).json({ error: 'folder name is required' });
+    return;
+  }
+  const existing = db
+    .prepare('SELECT id FROM folders WHERE user_id = ? AND LOWER(name) = LOWER(?) LIMIT 1')
+    .get(req.user.id, rawName);
+  if (existing) {
+    res.status(409).json({ error: 'folder name already exists' });
+    return;
+  }
+  const id = randomUUID();
+  const now = nowIso();
+  db.prepare(
+    `INSERT INTO folders (id, user_id, name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(id, req.user.id, rawName, now, now);
+  res.status(201).json({ folder: { id, name: rawName, createdAt: now, updatedAt: now } });
+});
+
+app.patch('/api/folders/:id', requireAuth, (req, res) => {
+  const folderId = String(req.params.id || '').trim();
+  const rawName = normalizeFolderName(req.body?.name);
+  if (!rawName) {
+    res.status(400).json({ error: 'folder name is required' });
+    return;
+  }
+  const current = db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(folderId, req.user.id);
+  if (!current) {
+    res.status(404).json({ error: 'folder not found' });
+    return;
+  }
+  const existing = db
+    .prepare('SELECT id FROM folders WHERE user_id = ? AND LOWER(name) = LOWER(?) AND id != ? LIMIT 1')
+    .get(req.user.id, rawName, folderId);
+  if (existing) {
+    res.status(409).json({ error: 'folder name already exists' });
+    return;
+  }
+  const now = nowIso();
+  db.prepare('UPDATE folders SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?').run(
+    rawName,
+    now,
+    folderId,
+    req.user.id
+  );
+  res.json({ folder: { id: folderId, name: rawName, updatedAt: now } });
+});
+
+app.delete('/api/folders/:id', requireAuth, (req, res) => {
+  const folderId = String(req.params.id || '').trim();
+  const current = db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(folderId, req.user.id);
+  if (!current) {
+    res.status(404).json({ error: 'folder not found' });
+    return;
+  }
+  db.prepare('UPDATE files SET folder_id = NULL, updated_at = ? WHERE folder_id = ? AND user_id = ?').run(
+    nowIso(),
+    folderId,
+    req.user.id
+  );
+  db.prepare('DELETE FROM folders WHERE id = ? AND user_id = ?').run(folderId, req.user.id);
+  res.json({ ok: true, id: folderId });
 });
 
 app.get('/api/import-packages/:language', (req, res) => {

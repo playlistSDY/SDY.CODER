@@ -109,6 +109,7 @@ const MIN_PANEL_HEIGHT_PX = 96;
 const LEGACY_CSHARP_STARTER =
   `using System;\n\npublic class Main {\n    public static void Main(string[] args) {\n        Console.WriteLine(\"Hello, C#\");\n    }\n}\n`;
 const DEFAULT_NEW_FILE_BASENAME = 'untitled';
+const DEFAULT_NEW_FOLDER_BASENAME = 'folder';
 
 function isSupportedLanguage(value) {
   return LANGUAGES.some((item) => item.id === value);
@@ -141,31 +142,71 @@ function createLocalFile(languageId = DEFAULT_LANGUAGE, fileName = DEFAULT_NEW_F
   return {
     id: `guest:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     name: normalizeFileName(fileName, languageId),
+    folderId: null,
     language: languageId,
     content: getStarterForLanguage(languageId),
     stdin: ''
   };
 }
 
+function normalizeFolderName(name) {
+  return String(name || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, ' ');
+}
+
+function createLocalFolder(name = DEFAULT_NEW_FOLDER_BASENAME) {
+  return {
+    id: `guest-folder:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+    name: normalizeFolderName(name) || DEFAULT_NEW_FOLDER_BASENAME
+  };
+}
+
+function sortFoldersByName(items) {
+  return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+
+function sortFilesByName(items) {
+  return [...items].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+
 function loadGuestWorkspace() {
   if (typeof window === 'undefined') {
     const fallback = createLocalFile(DEFAULT_LANGUAGE);
-    return { files: [fallback], selectedFileId: fallback.id };
+    return { files: [fallback], folders: [], selectedFileId: fallback.id };
   }
   try {
     const rawFiles = window.localStorage.getItem(GUEST_FILES_STORAGE_KEY);
+    const rawFolders = window.localStorage.getItem(`${GUEST_FILES_STORAGE_KEY}:folders`);
     const rawSelectedFileId = window.localStorage.getItem(GUEST_SELECTED_FILE_ID_STORAGE_KEY);
     if (rawFiles === null) {
       const fallback = createLocalFile(loadLastLanguage());
-      return { files: [fallback], selectedFileId: fallback.id };
+      return { files: [fallback], folders: [], selectedFileId: fallback.id };
     }
     const parsedFiles = JSON.parse(rawFiles || '[]');
+    const parsedFolders = JSON.parse(rawFolders || '[]');
+    const folders = Array.isArray(parsedFolders)
+      ? sortFoldersByName(
+          parsedFolders
+            .filter((folder) => folder && typeof folder.id === 'string')
+            .map((folder) => ({
+              id: folder.id,
+              name: normalizeFolderName(folder.name) || DEFAULT_NEW_FOLDER_BASENAME
+            }))
+        )
+      : [];
     const files = Array.isArray(parsedFiles)
-      ? parsedFiles
+      ? sortFilesByName(
+          parsedFiles
           .filter((file) => file && typeof file.id === 'string' && isSupportedLanguage(file.language))
           .map((file) => ({
             id: file.id,
             name: normalizeFileName(file.name, file.language),
+            folderId:
+              typeof file.folderId === 'string' && folders.some((folder) => folder.id === file.folderId)
+                ? file.folderId
+                : null,
             language: file.language,
             content:
               typeof file.content === 'string'
@@ -173,24 +214,26 @@ function loadGuestWorkspace() {
                 : getStarterForLanguage(file.language),
             stdin: typeof file.stdin === 'string' ? file.stdin : ''
           }))
+        )
       : [];
     if (files.length === 0) {
-      return { files: [], selectedFileId: null };
+      return { files: [], folders, selectedFileId: null };
     }
     const selectedFileId = files.some((file) => file.id === rawSelectedFileId) ? rawSelectedFileId : files[0].id;
-    return { files, selectedFileId };
+    return { files, folders, selectedFileId };
   } catch {
     const fallback = createLocalFile(DEFAULT_LANGUAGE);
-    return { files: [fallback], selectedFileId: fallback.id };
+    return { files: [fallback], folders: [], selectedFileId: fallback.id };
   }
 }
 
-function saveGuestWorkspace(files, selectedFileId) {
+function saveGuestWorkspace(files, folders, selectedFileId) {
   if (typeof window === 'undefined') {
     return;
   }
   try {
-    window.localStorage.setItem(GUEST_FILES_STORAGE_KEY, JSON.stringify(files));
+    window.localStorage.setItem(GUEST_FILES_STORAGE_KEY, JSON.stringify(sortFilesByName(files)));
+    window.localStorage.setItem(`${GUEST_FILES_STORAGE_KEY}:folders`, JSON.stringify(sortFoldersByName(folders)));
     window.localStorage.setItem(GUEST_SELECTED_FILE_ID_STORAGE_KEY, selectedFileId || '');
   } catch {
     // Ignore storage errors.
@@ -514,6 +557,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [googleClientId, setGoogleClientId] = useState('');
   const [files, setFiles] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [workspaceReady, setWorkspaceReady] = useState(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
@@ -522,11 +566,19 @@ export default function App() {
   const [newFileName, setNewFileName] = useState('');
   const [newFileLanguage, setNewFileLanguage] = useState(() => loadLastLanguage());
   const [createFileError, setCreateFileError] = useState('');
+  const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [createFolderError, setCreateFolderError] = useState('');
   const [renameFileModalOpen, setRenameFileModalOpen] = useState(false);
   const [renameFileId, setRenameFileId] = useState(null);
   const [renameFileName, setRenameFileName] = useState('');
   const [renameFileLanguage, setRenameFileLanguage] = useState(DEFAULT_LANGUAGE);
   const [renameFileError, setRenameFileError] = useState('');
+  const [editFolderModalOpen, setEditFolderModalOpen] = useState(false);
+  const [editFolderId, setEditFolderId] = useState(null);
+  const [editFolderName, setEditFolderName] = useState('');
+  const [editFolderError, setEditFolderError] = useState('');
+  const [draggingFileId, setDraggingFileId] = useState(null);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -566,18 +618,37 @@ export default function App() {
   const stdinSaveTimersRef = useRef(new Map());
   const selectedFileIdRef = useRef(null);
   const filesRef = useRef([]);
+  const foldersRef = useRef([]);
   const userRef = useRef(null);
   const stdinTextRef = useRef('');
   const selectedFile = files.find((item) => item.id === selectedFileId) || null;
   const activeFile = selectedFile;
   const hasFiles = files.length > 0;
   const normalizedNewFileName = normalizeFileName(newFileName, newFileLanguage);
-  const createNameTaken = files.some((file) => file.name === normalizedNewFileName);
+  const createNameTaken = files.some((file) => (file.folderId || null) === null && file.name === normalizedNewFileName);
   const createHasDot = hasInvalidFileBaseName(newFileName);
   const renameHasDot = hasInvalidFileBaseName(renameFileName);
   const renameNormalizedFileName = normalizeFileName(renameFileName, renameFileLanguage);
-  const renameNameTaken = files.some((file) => file.id !== renameFileId && file.name === renameNormalizedFileName);
+  const renameTarget = files.find((file) => file.id === renameFileId);
+  const renameNameTaken = files.some(
+    (file) =>
+      file.id !== renameFileId &&
+      file.name === renameNormalizedFileName &&
+      (file.folderId || null) === (renameTarget?.folderId || null)
+  );
+  const normalizedNewFolderName = normalizeFolderName(newFolderName);
+  const createFolderNameTaken = folders.some(
+    (folder) => folder.name.localeCompare(normalizedNewFolderName, undefined, { sensitivity: 'base' }) === 0
+  );
+  const normalizedEditFolderName = normalizeFolderName(editFolderName);
+  const editFolderNameTaken = folders.some(
+    (folder) =>
+      folder.id !== editFolderId &&
+      folder.name.localeCompare(normalizedEditFolderName, undefined, { sensitivity: 'base' }) === 0
+  );
   const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken && !createHasDot;
+  const rootFiles = sortFilesByName(files.filter((file) => !file.folderId));
+  const sortedFolders = sortFoldersByName(folders);
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -596,6 +667,9 @@ export default function App() {
   const appendLog = (line) => {
     appendLogWithId(line);
   };
+
+  const getFilesForFolder = (folderId) =>
+    sortFilesByName(files.filter((file) => (file.folderId || null) === folderId));
 
   const markSavedNow = () => {
     const now = new Date();
@@ -667,7 +741,7 @@ export default function App() {
     setFiles((prev) => {
       const nextFiles = updateFiles(prev);
       if (!user) {
-        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        saveGuestWorkspace(nextFiles, foldersRef.current, selectedFileIdRef.current);
       }
       return nextFiles;
     });
@@ -692,7 +766,7 @@ export default function App() {
     setFiles((prev) => {
       const nextFiles = updateFiles(prev);
       if (!user) {
-        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        saveGuestWorkspace(nextFiles, foldersRef.current, selectedFileIdRef.current);
       }
       return nextFiles;
     });
@@ -763,7 +837,7 @@ export default function App() {
           const patch = patches.find((entry) => entry.fileId === file.id);
           return patch ? { ...file, content: patch.content, stdin: patch.stdin } : file;
         });
-        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        saveGuestWorkspace(nextFiles, foldersRef.current, selectedFileIdRef.current);
         return nextFiles;
       });
       markSavedNow();
@@ -947,6 +1021,10 @@ export default function App() {
   }, [files]);
 
   useEffect(() => {
+    foldersRef.current = folders;
+  }, [folders]);
+
+  useEffect(() => {
     userRef.current = user;
   }, [user]);
 
@@ -1081,7 +1159,7 @@ export default function App() {
           const patch = patches.find((entry) => entry.fileId === file.id);
           return patch ? { ...file, content: patch.content, stdin: patch.stdin } : file;
         });
-        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        saveGuestWorkspace(nextFiles, foldersRef.current, selectedFileIdRef.current);
         return;
       }
 
@@ -1108,6 +1186,7 @@ export default function App() {
     if (!user) {
       const guestWorkspace = loadGuestWorkspace();
       setFiles(guestWorkspace.files);
+      setFolders(guestWorkspace.folders || []);
       setSelectedFileId(guestWorkspace.selectedFileId);
       setLoginPromptOpen(false);
       setWorkspaceReady(true);
@@ -1122,7 +1201,9 @@ export default function App() {
         if (cancelled) {
           return;
         }
-        const nextFiles = payload.files || [];
+        const nextFiles = sortFilesByName(payload.files || []);
+        const nextFolders = sortFoldersByName(payload.folders || []);
+        setFolders(nextFolders);
         const storedSelectedFileId = loadUserSelectedFileId(user?.id);
         setFiles(nextFiles);
         setSelectedFileId((prev) => {
@@ -1150,8 +1231,8 @@ export default function App() {
     if (authLoading || user) {
       return;
     }
-    saveGuestWorkspace(files, selectedFileId);
-  }, [authLoading, user, files, selectedFileId]);
+    saveGuestWorkspace(files, folders, selectedFileId);
+  }, [authLoading, user, files, folders, selectedFileId]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -1926,9 +2007,49 @@ export default function App() {
     setCreateFileModalOpen(true);
   };
 
+  const openCreateFolderModal = () => {
+    setNewFolderName('');
+    setCreateFolderError('');
+    setCreateFolderModalOpen(true);
+  };
+
+  const closeCreateFolderModal = () => {
+    setCreateFolderModalOpen(false);
+    setNewFolderName('');
+    setCreateFolderError('');
+  };
+
   const closeCreateFileModal = () => {
     setCreateFileError('');
     setCreateFileModalOpen(false);
+  };
+
+  const createFolder = async () => {
+    if (!normalizedNewFolderName) {
+      setCreateFolderError('폴더 이름을 입력해야 합니다.');
+      return;
+    }
+    if (createFolderNameTaken) {
+      setCreateFolderError('같은 이름의 폴더가 이미 있습니다.');
+      return;
+    }
+    try {
+      let nextFolder;
+      if (user) {
+        const payload = await fetchJson('/api/folders', {
+          method: 'POST',
+          body: JSON.stringify({ name: newFolderName })
+        });
+        nextFolder = payload.folder;
+      } else {
+        nextFolder = createLocalFolder(newFolderName);
+      }
+      setFolders((prev) => sortFoldersByName([...prev, nextFolder]));
+      closeCreateFolderModal();
+    } catch (error) {
+      setCreateFolderError(error.message || '폴더 생성에 실패했습니다.');
+      appendLog(`folder create failed: ${error.message}`);
+    }
   };
 
   const createFile = async () => {
@@ -1957,7 +2078,7 @@ export default function App() {
       setFiles((prev) => {
         const nextFiles = [nextFile, ...prev];
         if (!user) {
-          saveGuestWorkspace(nextFiles, nextFile.id);
+          saveGuestWorkspace(nextFiles, foldersRef.current, nextFile.id);
         }
         return nextFiles;
       });
@@ -1979,12 +2100,26 @@ export default function App() {
     setRenameFileModalOpen(true);
   };
 
+  const openEditFolderModal = (folder) => {
+    setEditFolderId(folder.id);
+    setEditFolderName(folder.name);
+    setEditFolderError('');
+    setEditFolderModalOpen(true);
+  };
+
   const closeRenameFileModal = () => {
     setRenameFileModalOpen(false);
     setRenameFileId(null);
     setRenameFileName('');
     setRenameFileLanguage(DEFAULT_LANGUAGE);
     setRenameFileError('');
+  };
+
+  const closeEditFolderModal = () => {
+    setEditFolderModalOpen(false);
+    setEditFolderId(null);
+    setEditFolderName('');
+    setEditFolderError('');
   };
 
   const deleteFile = async () => {
@@ -2016,7 +2151,7 @@ export default function App() {
       const nextSelectedFileId = selectedFileId === targetFile.id ? nextFiles[0]?.id || null : selectedFileId;
       setFiles(nextFiles);
       if (!user) {
-        saveGuestWorkspace(nextFiles, nextSelectedFileId);
+        saveGuestWorkspace(nextFiles, foldersRef.current, nextSelectedFileId);
       }
       if (selectedFileId === targetFile.id) {
         setSelectedFileId(nextSelectedFileId);
@@ -2025,6 +2160,93 @@ export default function App() {
       closeRenameFileModal();
     } catch (error) {
       appendLog(`file delete failed: ${error.message}`);
+    }
+  };
+
+  const saveFolderMetadata = async (folderId, name) => {
+    if (user) {
+      const payload = await fetchJson(`/api/folders/${folderId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name })
+      });
+      return payload.folder;
+    }
+    return { id: folderId, name: normalizeFolderName(name) };
+  };
+
+  const renameFolder = async () => {
+    if (!editFolderId) {
+      closeEditFolderModal();
+      return;
+    }
+    if (!normalizedEditFolderName) {
+      setEditFolderError('폴더 이름을 입력해야 합니다.');
+      return;
+    }
+    if (editFolderNameTaken) {
+      setEditFolderError('같은 이름의 폴더가 이미 있습니다.');
+      return;
+    }
+    try {
+      const nextFolder = await saveFolderMetadata(editFolderId, editFolderName);
+      setFolders((prev) =>
+        sortFoldersByName(prev.map((folder) => (folder.id === editFolderId ? { ...folder, ...nextFolder } : folder)))
+      );
+      closeEditFolderModal();
+    } catch (error) {
+      setEditFolderError(error.message || '폴더 수정에 실패했습니다.');
+      appendLog(`folder update failed: ${error.message}`);
+    }
+  };
+
+  const deleteFolder = async () => {
+    if (!editFolderId) {
+      closeEditFolderModal();
+      return;
+    }
+    try {
+      if (user) {
+        await fetchJson(`/api/folders/${editFolderId}`, { method: 'DELETE' });
+      }
+      setFolders((prev) => prev.filter((folder) => folder.id !== editFolderId));
+      setFiles((prev) =>
+        sortFilesByName(prev.map((file) => (file.folderId === editFolderId ? { ...file, folderId: null } : file)))
+      );
+      closeEditFolderModal();
+    } catch (error) {
+      setEditFolderError(error.message || '폴더 삭제에 실패했습니다.');
+      appendLog(`folder delete failed: ${error.message}`);
+    }
+  };
+
+  const moveFileToFolder = async (fileId, folderId) => {
+    const targetFile = files.find((file) => file.id === fileId);
+    if (!targetFile) {
+      return;
+    }
+    const nextFolderId = folderId || null;
+    if ((targetFile.folderId || null) === nextFolderId) {
+      return;
+    }
+    const nameConflict = files.some(
+      (file) => file.id !== fileId && file.name === targetFile.name && (file.folderId || null) === nextFolderId
+    );
+    if (nameConflict) {
+      appendLog('file move failed: same file name already exists in the target folder');
+      return;
+    }
+    try {
+      if (user) {
+        await fetchJson(`/api/files/${fileId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ folderId: nextFolderId })
+        });
+      }
+      setFiles((prev) =>
+        sortFilesByName(prev.map((file) => (file.id === fileId ? { ...file, folderId: nextFolderId } : file)))
+      );
+    } catch (error) {
+      appendLog(`file move failed: ${error.message}`);
     }
   };
 
@@ -2075,7 +2297,7 @@ export default function App() {
     setFiles((prev) => {
       const nextFiles = prev.map((file) => (file.id === nextFile.id ? nextFile : file));
       if (!user) {
-        saveGuestWorkspace(nextFiles, selectedFileIdRef.current);
+        saveGuestWorkspace(nextFiles, foldersRef.current, selectedFileIdRef.current);
       }
       return nextFiles;
     });
@@ -2311,36 +2533,132 @@ export default function App() {
             )}
             <div className="explorer-files-header">
               <span>FILES</span>
-              <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
-                +
-              </button>
+              <div className="explorer-files-actions">
+                <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFolderModal}>
+                  F
+                </button>
+                <button type="button" className="control-btn secondary-btn explorer-header-btn" onClick={openCreateFileModal}>
+                  +
+                </button>
+              </div>
             </div>
-            <div className="explorer-files">
-              {files.length === 0 ? (
+            <div
+              className="explorer-files"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const fileId = event.dataTransfer.getData('text/plain');
+                if (fileId) {
+                  void moveFileToFolder(fileId, null);
+                }
+                setDraggingFileId(null);
+              }}
+            >
+              {files.length === 0 && folders.length === 0 ? (
                 <div className="explorer-empty">아직 파일이 없습니다. `+` 버튼으로 새 파일을 만드세요.</div>
               ) : (
-                files.map((file) => (
-                  <div key={file.id} className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}>
-                    <button
-                      type="button"
-                      className={`explorer-file${file.id === selectedFileId ? ' active' : ''}`}
-                      onClick={() => setSelectedFileId(file.id)}
-                    >
-                      {file.name}
-                    </button>
-                    <button
-                      type="button"
-                      className="explorer-file-action"
-                      title="Rename file"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        openRenameFileModal(file);
+                <>
+                  {sortedFolders.map((folder) => (
+                    <div
+                      key={folder.id}
+                      className="explorer-folder"
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const fileId = event.dataTransfer.getData('text/plain');
+                        if (fileId) {
+                          void moveFileToFolder(fileId, folder.id);
+                        }
+                        setDraggingFileId(null);
                       }}
                     >
-                      ✎
-                    </button>
+                      <div className="explorer-folder-header">
+                        <span className="explorer-folder-label">{folder.name}</span>
+                        <button
+                          type="button"
+                          className="explorer-file-action"
+                          title="Edit folder"
+                          onClick={() => openEditFolderModal(folder)}
+                        >
+                          ✎
+                        </button>
+                      </div>
+                      <div className="explorer-folder-files">
+                        {getFilesForFolder(folder.id).length === 0 ? (
+                          <div className="explorer-folder-empty">여기로 파일을 드래그하세요.</div>
+                        ) : (
+                          getFilesForFolder(folder.id).map((file) => (
+                            <div
+                              key={file.id}
+                              className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}
+                              draggable
+                              onDragStart={(event) => {
+                                event.dataTransfer.setData('text/plain', file.id);
+                                setDraggingFileId(file.id);
+                              }}
+                              onDragEnd={() => setDraggingFileId(null)}
+                            >
+                              <button
+                                type="button"
+                                className={`explorer-file${file.id === selectedFileId ? ' active' : ''}`}
+                                onClick={() => setSelectedFileId(file.id)}
+                              >
+                                {file.name}
+                              </button>
+                              <button
+                                type="button"
+                                className="explorer-file-action"
+                                title="Rename file"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openRenameFileModal(file);
+                                }}
+                              >
+                                ✎
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <div className={`explorer-root-dropzone${draggingFileId ? ' drag-active' : ''}`}>
+                    {rootFiles.map((file) => (
+                      <div
+                        key={file.id}
+                        className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}
+                        draggable
+                        onDragStart={(event) => {
+                          event.dataTransfer.setData('text/plain', file.id);
+                          setDraggingFileId(file.id);
+                        }}
+                        onDragEnd={() => setDraggingFileId(null)}
+                      >
+                        <button
+                          type="button"
+                          className={`explorer-file${file.id === selectedFileId ? ' active' : ''}`}
+                          onClick={() => setSelectedFileId(file.id)}
+                        >
+                          {file.name}
+                        </button>
+                        <button
+                          type="button"
+                          className="explorer-file-action"
+                          title="Rename file"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openRenameFileModal(file);
+                          }}
+                        >
+                          ✎
+                        </button>
+                      </div>
+                    ))}
+                    {draggingFileId && rootFiles.length === 0 ? (
+                      <div className="explorer-folder-empty">여기로 드롭하면 루트로 이동합니다.</div>
+                    ) : null}
                   </div>
-                ))
+                </>
               )}
             </div>
             </aside>
@@ -2595,6 +2913,49 @@ export default function App() {
           </div>
         </div>
       ) : null}
+      {createFolderModalOpen ? (
+        <div className="modal-backdrop" onClick={closeCreateFolderModal}>
+          <div
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-folder-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="create-folder-title">
+              Create Folder
+            </div>
+            <div className="confirm-modal-body">
+              <input
+                className="file-name-input"
+                value={newFolderName}
+                onChange={(event) => {
+                  setNewFolderName(event.target.value);
+                  if (createFolderError) {
+                    setCreateFolderError('');
+                  }
+                }}
+                placeholder="Folder name"
+                autoFocus
+              />
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closeCreateFolderModal}>
+                Cancel
+              </button>
+              <button type="button" className="control-btn primary-btn" onClick={createFolder}>
+                Create
+              </button>
+            </div>
+            {!normalizedNewFolderName ? (
+              <div className="confirm-modal-body modal-error">폴더 이름을 입력해야 합니다.</div>
+            ) : createFolderNameTaken ? (
+              <div className="confirm-modal-body modal-error">같은 이름의 폴더가 이미 있습니다.</div>
+            ) : null}
+            {createFolderError ? <div className="confirm-modal-body modal-error">{createFolderError}</div> : null}
+          </div>
+        </div>
+      ) : null}
       {renameFileModalOpen ? (
         <div className="modal-backdrop">
           <div
@@ -2653,6 +3014,52 @@ export default function App() {
               <div className="confirm-modal-body modal-error">같은 이름의 파일이 이미 있습니다.</div>
             ) : null}
             {renameFileError ? <div className="confirm-modal-body modal-error">{renameFileError}</div> : null}
+          </div>
+        </div>
+      ) : null}
+      {editFolderModalOpen ? (
+        <div className="modal-backdrop">
+          <div
+            className="confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="edit-folder-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="edit-folder-title">
+              Edit Folder
+            </div>
+            <div className="confirm-modal-body">
+              <input
+                className="file-name-input"
+                value={editFolderName}
+                onChange={(event) => {
+                  setEditFolderName(event.target.value);
+                  if (editFolderError) {
+                    setEditFolderError('');
+                  }
+                }}
+                placeholder="Folder name"
+                autoFocus
+              />
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closeEditFolderModal}>
+                Cancel
+              </button>
+              <button type="button" className="control-btn danger-btn" onClick={deleteFolder}>
+                Delete
+              </button>
+              <button type="button" className="control-btn primary-btn" onClick={renameFolder}>
+                Save
+              </button>
+            </div>
+            {!normalizedEditFolderName ? (
+              <div className="confirm-modal-body modal-error">폴더 이름을 입력해야 합니다.</div>
+            ) : editFolderNameTaken ? (
+              <div className="confirm-modal-body modal-error">같은 이름의 폴더가 이미 있습니다.</div>
+            ) : null}
+            {editFolderError ? <div className="confirm-modal-body modal-error">{editFolderError}</div> : null}
           </div>
         </div>
       ) : null}
