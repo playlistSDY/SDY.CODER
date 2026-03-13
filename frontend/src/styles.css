@@ -502,10 +502,29 @@ body,
   background: rgba(255, 255, 255, 0.02);
 }
 
+.explorer-folder.drag-hover {
+  border-color: #3f6ea8;
+  background: rgba(0, 120, 212, 0.08);
+}
+
 .explorer-folder-header {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.explorer-folder-toggle {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 2px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.explorer-folder-toggle:hover {
+  color: var(--text-main);
 }
 
 .explorer-folder-label {

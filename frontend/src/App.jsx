@@ -565,6 +565,7 @@ export default function App() {
   const [createFileModalOpen, setCreateFileModalOpen] = useState(false);
   const [newFileName, setNewFileName] = useState('');
   const [newFileLanguage, setNewFileLanguage] = useState(() => loadLastLanguage());
+  const [createFileFolderId, setCreateFileFolderId] = useState(null);
   const [createFileError, setCreateFileError] = useState('');
   const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -579,6 +580,9 @@ export default function App() {
   const [editFolderName, setEditFolderName] = useState('');
   const [editFolderError, setEditFolderError] = useState('');
   const [draggingFileId, setDraggingFileId] = useState(null);
+  const [dragHoverFolderId, setDragHoverFolderId] = useState(null);
+  const [rootDropActive, setRootDropActive] = useState(false);
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState(() => new Set());
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
   const [lastSavedAt, setLastSavedAt] = useState(null);
@@ -625,7 +629,9 @@ export default function App() {
   const activeFile = selectedFile;
   const hasFiles = files.length > 0;
   const normalizedNewFileName = normalizeFileName(newFileName, newFileLanguage);
-  const createNameTaken = files.some((file) => (file.folderId || null) === null && file.name === normalizedNewFileName);
+  const createNameTaken = files.some(
+    (file) => (file.folderId || null) === (createFileFolderId || null) && file.name === normalizedNewFileName
+  );
   const createHasDot = hasInvalidFileBaseName(newFileName);
   const renameHasDot = hasInvalidFileBaseName(renameFileName);
   const renameNormalizedFileName = normalizeFileName(renameFileName, renameFileLanguage);
@@ -2001,6 +2007,15 @@ export default function App() {
   };
 
   const openCreateFileModal = () => {
+    setCreateFileFolderId(null);
+    setNewFileName('');
+    setNewFileLanguage(language);
+    setCreateFileError('');
+    setCreateFileModalOpen(true);
+  };
+
+  const openCreateFileModalForFolder = (folderId) => {
+    setCreateFileFolderId(folderId || null);
     setNewFileName('');
     setNewFileLanguage(language);
     setCreateFileError('');
@@ -2020,6 +2035,7 @@ export default function App() {
   };
 
   const closeCreateFileModal = () => {
+    setCreateFileFolderId(null);
     setCreateFileError('');
     setCreateFileModalOpen(false);
   };
@@ -2066,6 +2082,7 @@ export default function App() {
           method: 'POST',
           body: JSON.stringify({
             name: newFileName,
+            folderId: createFileFolderId,
             language: newFileLanguage,
             content: getStarterForLanguage(newFileLanguage),
             stdin: ''
@@ -2073,7 +2090,7 @@ export default function App() {
         });
         nextFile = payload.file;
       } else {
-        nextFile = createLocalFile(newFileLanguage, newFileName);
+        nextFile = { ...createLocalFile(newFileLanguage, newFileName), folderId: createFileFolderId };
       }
       setFiles((prev) => {
         const nextFiles = [nextFile, ...prev];
@@ -2217,6 +2234,18 @@ export default function App() {
       setEditFolderError(error.message || '폴더 삭제에 실패했습니다.');
       appendLog(`folder delete failed: ${error.message}`);
     }
+  };
+
+  const toggleFolderCollapsed = (folderId) => {
+    setCollapsedFolderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderId)) {
+        next.delete(folderId);
+      } else {
+        next.add(folderId);
+      }
+      return next;
+    });
   };
 
   const moveFileToFolder = async (fileId, folderId) => {
@@ -2544,7 +2573,11 @@ export default function App() {
             </div>
             <div
               className="explorer-files"
-              onDragOver={(event) => event.preventDefault()}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setRootDropActive(true);
+              }}
+              onDragLeave={() => setRootDropActive(false)}
               onDrop={(event) => {
                 event.preventDefault();
                 const fileId = event.dataTransfer.getData('text/plain');
@@ -2552,6 +2585,8 @@ export default function App() {
                   void moveFileToFolder(fileId, null);
                 }
                 setDraggingFileId(null);
+                setDragHoverFolderId(null);
+                setRootDropActive(false);
               }}
             >
               {files.length === 0 && folders.length === 0 ? (
@@ -2561,8 +2596,17 @@ export default function App() {
                   {sortedFolders.map((folder) => (
                     <div
                       key={folder.id}
-                      className="explorer-folder"
-                      onDragOver={(event) => event.preventDefault()}
+                      className={`explorer-folder${dragHoverFolderId === folder.id ? ' drag-hover' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        setDragHoverFolderId(folder.id);
+                        setRootDropActive(false);
+                      }}
+                      onDragLeave={() => {
+                        if (dragHoverFolderId === folder.id) {
+                          setDragHoverFolderId(null);
+                        }
+                      }}
                       onDrop={(event) => {
                         event.preventDefault();
                         const fileId = event.dataTransfer.getData('text/plain');
@@ -2570,10 +2614,27 @@ export default function App() {
                           void moveFileToFolder(fileId, folder.id);
                         }
                         setDraggingFileId(null);
+                        setDragHoverFolderId(null);
                       }}
                     >
                       <div className="explorer-folder-header">
+                        <button
+                          type="button"
+                          className="explorer-folder-toggle"
+                          onClick={() => toggleFolderCollapsed(folder.id)}
+                          title={collapsedFolderIds.has(folder.id) ? 'Expand folder' : 'Collapse folder'}
+                        >
+                          {collapsedFolderIds.has(folder.id) ? '▸' : '▾'}
+                        </button>
                         <span className="explorer-folder-label">{folder.name}</span>
+                        <button
+                          type="button"
+                          className="explorer-file-action"
+                          title="Create file in folder"
+                          onClick={() => openCreateFileModalForFolder(folder.id)}
+                        >
+                          +
+                        </button>
                         <button
                           type="button"
                           className="explorer-file-action"
@@ -2583,46 +2644,52 @@ export default function App() {
                           ✎
                         </button>
                       </div>
-                      <div className="explorer-folder-files">
-                        {getFilesForFolder(folder.id).length === 0 ? (
-                          <div className="explorer-folder-empty">여기로 파일을 드래그하세요.</div>
-                        ) : (
-                          getFilesForFolder(folder.id).map((file) => (
-                            <div
-                              key={file.id}
-                              className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}
-                              draggable
-                              onDragStart={(event) => {
-                                event.dataTransfer.setData('text/plain', file.id);
-                                setDraggingFileId(file.id);
-                              }}
-                              onDragEnd={() => setDraggingFileId(null)}
-                            >
-                              <button
-                                type="button"
-                                className={`explorer-file${file.id === selectedFileId ? ' active' : ''}`}
-                                onClick={() => setSelectedFileId(file.id)}
-                              >
-                                {file.name}
-                              </button>
-                              <button
-                                type="button"
-                                className="explorer-file-action"
-                                title="Rename file"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openRenameFileModal(file);
+                      {!collapsedFolderIds.has(folder.id) ? (
+                        <div className="explorer-folder-files">
+                          {getFilesForFolder(folder.id).length === 0 ? (
+                            <div className="explorer-folder-empty">여기로 파일을 드래그하거나 + 로 새 파일을 만드세요.</div>
+                          ) : (
+                            getFilesForFolder(folder.id).map((file) => (
+                              <div
+                                key={file.id}
+                                className={`explorer-file-row${file.id === selectedFileId ? ' active' : ''}`}
+                                draggable
+                                onDragStart={(event) => {
+                                  event.dataTransfer.setData('text/plain', file.id);
+                                  setDraggingFileId(file.id);
+                                }}
+                                onDragEnd={() => {
+                                  setDraggingFileId(null);
+                                  setDragHoverFolderId(null);
+                                  setRootDropActive(false);
                                 }}
                               >
-                                ✎
-                              </button>
-                            </div>
-                          ))
-                        )}
-                      </div>
+                                <button
+                                  type="button"
+                                  className={`explorer-file${file.id === selectedFileId ? ' active' : ''}`}
+                                  onClick={() => setSelectedFileId(file.id)}
+                                >
+                                  {file.name}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="explorer-file-action"
+                                  title="Rename file"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openRenameFileModal(file);
+                                  }}
+                                >
+                                  ✎
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
-                  <div className={`explorer-root-dropzone${draggingFileId ? ' drag-active' : ''}`}>
+                  <div className={`explorer-root-dropzone${rootDropActive ? ' drag-active' : ''}`}>
                     {rootFiles.map((file) => (
                       <div
                         key={file.id}
@@ -2632,7 +2699,11 @@ export default function App() {
                           event.dataTransfer.setData('text/plain', file.id);
                           setDraggingFileId(file.id);
                         }}
-                        onDragEnd={() => setDraggingFileId(null)}
+                        onDragEnd={() => {
+                          setDraggingFileId(null);
+                          setDragHoverFolderId(null);
+                          setRootDropActive(false);
+                        }}
                       >
                         <button
                           type="button"
