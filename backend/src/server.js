@@ -228,7 +228,7 @@ function getStarterForLanguage(language) {
     case 'cpp':
       return `#include <iostream>\n\nint main() {\n    std::cout << "Hello, C++" << std::endl;\n    return 0;\n}\n`;
     case 'java':
-      return `public class Main {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
+      return buildJavaStarter();
     case 'csharp':
       return `using System;\n\npublic class Program {\n    public static void Main(string[] args) {\n        Console.WriteLine("Hello, C#");\n    }\n}\n`;
     case 'nodejs':
@@ -246,6 +246,22 @@ function getStarterForLanguage(language) {
 
 function getFileExtension(language) {
   return DOCKER_RUN_SPEC[language]?.sourceFile?.split('.').pop() || 'txt';
+}
+
+function getJavaPrimaryTypeName(fileName = 'Main.java') {
+  const base = String(fileName || '')
+    .replace(/\.[^.]+$/, '')
+    .trim();
+  const cleaned = base.replace(/[^A-Za-z0-9_$]/g, '');
+  if (!cleaned) {
+    return 'Main';
+  }
+  return /^[A-Za-z_$]/.test(cleaned) ? cleaned : `Main${cleaned}`;
+}
+
+function buildJavaStarter(fileName = 'Main.java') {
+  const className = getJavaPrimaryTypeName(fileName);
+  return `public class ${className} {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
 }
 
 function sanitizeFileBaseName(raw) {
@@ -2116,7 +2132,12 @@ app.post('/api/files', requireAuth, (req, res) => {
   const id = randomUUID();
   const now = nowIso();
   const name = normalizeFileName(rawName, language);
-  const content = typeof req.body?.content === 'string' ? req.body.content : getStarterForLanguage(language);
+  const content =
+    typeof req.body?.content === 'string'
+      ? req.body.content
+      : language === 'java'
+        ? buildJavaStarter(name)
+        : getStarterForLanguage(language);
   const stdin = typeof req.body?.stdin === 'string' ? req.body.stdin : '';
   if (folderId) {
     const folder = db.prepare('SELECT id FROM folders WHERE id = ? AND user_id = ?').get(folderId, req.user.id);

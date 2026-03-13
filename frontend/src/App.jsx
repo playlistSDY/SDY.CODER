@@ -139,12 +139,13 @@ function saveLastLanguage(lang) {
 }
 
 function createLocalFile(languageId = DEFAULT_LANGUAGE, fileName = DEFAULT_NEW_FILE_BASENAME) {
+  const normalizedName = normalizeFileName(fileName, languageId);
   return {
     id: `guest:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
-    name: normalizeFileName(fileName, languageId),
+    name: normalizedName,
     folderId: null,
     language: languageId,
-    content: getStarterForLanguage(languageId),
+    content: getStarterForLanguage(languageId, normalizedName),
     stdin: ''
   };
 }
@@ -211,7 +212,7 @@ function loadGuestWorkspace() {
             content:
               typeof file.content === 'string'
                 ? normalizeLoadedCode(file.language, file.content)
-                : getStarterForLanguage(file.language),
+                : getStarterForLanguage(file.language, file.name),
             stdin: typeof file.stdin === 'string' ? file.stdin : ''
           }))
         )
@@ -351,7 +352,37 @@ function getFileNameForLanguage(languageId) {
   return FILE_NAME_BY_LANG[languageId] || `main.${EXT_BY_LANG[languageId]}`;
 }
 
-function getStarterForLanguage(languageId) {
+function getJavaPrimaryTypeName(fileName) {
+  const base = String(fileName || '')
+    .replace(/\.[^.]+$/, '')
+    .trim();
+  const cleaned = base.replace(/[^A-Za-z0-9_$]/g, '');
+  if (!cleaned) {
+    return 'Main';
+  }
+  return /^[A-Za-z_$]/.test(cleaned) ? cleaned : `Main${cleaned}`;
+}
+
+function buildJavaStarter(fileName) {
+  const className = getJavaPrimaryTypeName(fileName);
+  return `public class ${className} {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
+}
+
+function syncJavaPrimaryTypeName(code, fileName) {
+  if (typeof code !== 'string') {
+    return buildJavaStarter(fileName);
+  }
+  const className = getJavaPrimaryTypeName(fileName);
+  if (/public\s+class\s+[A-Za-z_$][A-Za-z0-9_$]*/.test(code)) {
+    return code.replace(/public\s+class\s+[A-Za-z_$][A-Za-z0-9_$]*/, `public class ${className}`);
+  }
+  return code;
+}
+
+function getStarterForLanguage(languageId, fileName = null) {
+  if (languageId === 'java') {
+    return buildJavaStarter(fileName || getFileNameForLanguage(languageId));
+  }
   return LANGUAGES.find((item) => item.id === languageId)?.starter || '';
 }
 
@@ -2086,13 +2117,14 @@ export default function App() {
     try {
       let nextFile;
       if (user) {
+        const starterContent = getStarterForLanguage(newFileLanguage, normalizedNewFileName);
         const payload = await fetchJson('/api/files', {
           method: 'POST',
           body: JSON.stringify({
             name: newFileName,
             folderId: createFileFolderId,
             language: newFileLanguage,
-            content: getStarterForLanguage(newFileLanguage),
+            content: starterContent,
             stdin: ''
           })
         });
@@ -2293,6 +2325,9 @@ export default function App() {
     }
     const currentModel = ensureModelForFile(targetFile);
     const currentContent = currentModel?.getValue?.() ?? targetFile.content ?? '';
+    const nextName = normalizeFileName(name, nextLanguage);
+    const nextContent =
+      nextLanguage === 'java' ? syncJavaPrimaryTypeName(currentContent, nextName) : currentContent;
     let nextFile;
     if (user) {
       const payload = await fetchJson(`/api/files/${targetFile.id}`, {
@@ -2300,7 +2335,7 @@ export default function App() {
         body: JSON.stringify({
           name,
           language: nextLanguage,
-          content: currentContent,
+          content: nextContent,
           stdin: targetFile.stdin || ''
         })
       });
@@ -2308,16 +2343,16 @@ export default function App() {
     } else {
       nextFile = {
         ...targetFile,
-        name: normalizeFileName(name, nextLanguage),
+        name: nextName,
         language: nextLanguage,
-        content: currentContent,
+        content: nextContent,
         stdin: targetFile.stdin || ''
       };
     }
     const oldModel = modelsRef.current.get(targetFile.id);
     if (oldModel && monacoRef.current) {
       const replacement = monacoRef.current.editor.createModel(
-        currentContent,
+        nextContent,
         getMonacoLanguageForLanguage(nextFile.language),
         getModelUri(monacoRef.current, nextFile)
       );
@@ -2390,7 +2425,7 @@ export default function App() {
   const resetCurrentCode = () => {
     const model = activeFile ? modelsRef.current.get(activeFile.id) : null;
     const editor = editorRef.current;
-    const starter = getStarterForLanguage(language);
+    const starter = getStarterForLanguage(language, activeFile?.name);
 
     if (!model || typeof starter !== 'string') {
       setResetModalOpen(false);
