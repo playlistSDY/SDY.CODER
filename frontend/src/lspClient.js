@@ -13,6 +13,172 @@ const FILE_NAME_BY_LANG = {
   java: 'Main.java',
   csharp: 'Main.cs'
 };
+const CUSTOM_SNIPPETS_STORAGE_KEY = 'web-vscode:custom-snippets';
+
+const LANGUAGE_SNIPPETS = {
+  python: [
+    {
+      prefix: 'ifmain',
+      label: 'ifmain',
+      detail: 'Preset: if __name__ == "__main__"',
+      insertText: 'if __name__ == "__main__":\n    $0'
+    },
+    {
+      prefix: 'defm',
+      label: 'defm',
+      detail: 'Preset: def main()',
+      insertText: 'def main():\n    $0\n\n\nif __name__ == "__main__":\n    main()'
+    }
+  ],
+  java: [
+    {
+      prefix: 'pvsm',
+      label: 'pvsm',
+      detail: 'Preset: public static void main',
+      insertText: 'public static void main(String[] args) {\n\t$0\n}'
+    },
+    {
+      prefix: 'sout',
+      label: 'sout',
+      detail: 'Preset: System.out.println',
+      insertText: 'System.out.println($1);'
+    }
+  ],
+  c: [
+    {
+      prefix: 'main',
+      label: 'main',
+      detail: 'Preset: int main(void)',
+      insertText: 'int main(void) {\n\t$0\n\treturn 0;\n}'
+    }
+  ],
+  cpp: [
+    {
+      prefix: 'main',
+      label: 'main',
+      detail: 'Preset: int main()',
+      insertText: 'int main() {\n\t$0\n\treturn 0;\n}'
+    }
+  ],
+  csharp: [
+    {
+      prefix: 'cw',
+      label: 'cw',
+      detail: 'Preset: Console.WriteLine',
+      insertText: 'Console.WriteLine($1);'
+    }
+  ],
+  nodejs: [
+    {
+      prefix: 'fn',
+      label: 'fn',
+      detail: 'Preset: function',
+      insertText: 'function ${1:name}(${2}) {\n  $0\n}'
+    },
+    {
+      prefix: 'clg',
+      label: 'clg',
+      detail: 'Preset: console.log',
+      insertText: 'console.log($1);'
+    }
+  ],
+  go: [
+    {
+      prefix: 'main',
+      label: 'main',
+      detail: 'Preset: func main()',
+      insertText: 'func main() {\n\t$0\n}'
+    }
+  ],
+  kotlin: [
+    {
+      prefix: 'main',
+      label: 'main',
+      detail: 'Preset: fun main()',
+      insertText: 'fun main() {\n    $0\n}'
+    }
+  ],
+  dart: [
+    {
+      prefix: 'main',
+      label: 'main',
+      detail: 'Preset: void main()',
+      insertText: 'void main() {\n  $0\n}'
+    }
+  ]
+};
+
+function loadCustomSnippets(language) {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_SNIPPETS_STORAGE_KEY);
+    const parsed = JSON.parse(raw || '[]');
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter(
+        (entry) =>
+          entry &&
+          entry.language === language &&
+          typeof entry.prefix === 'string' &&
+          typeof entry.body === 'string' &&
+          entry.prefix.trim() &&
+          entry.body.trim()
+      )
+      .map((entry) => ({
+        prefix: entry.prefix.trim(),
+        label: entry.prefix.trim(),
+        detail: typeof entry.description === 'string' && entry.description.trim() ? entry.description.trim() : 'Custom preset',
+        insertText: entry.body
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function getSnippetFileName(language, fileName) {
+  if (typeof fileName === 'string' && fileName.trim()) {
+    return fileName.trim();
+  }
+  return FILE_NAME_BY_LANG[language] || `main.${EXT_BY_LANG[language] || 'txt'}`;
+}
+
+function getSnippetFileBase(fileName) {
+  return getSnippetFileName('', fileName).replace(/\.[^.]+$/, '');
+}
+
+function getSnippetClassName(language, fileName) {
+  const base = getSnippetFileBase(fileName).replace(/[^A-Za-z0-9_$]/g, '');
+  if (language === 'csharp') {
+    const normalized = base.replace(/\$/g, '');
+    if (!normalized) {
+      return 'Program';
+    }
+    return /^[A-Za-z_]/.test(normalized) ? normalized : `Program${normalized}`;
+  }
+  if (!base) {
+    return 'Main';
+  }
+  return /^[A-Za-z_$]/.test(base) ? base : `Main${base}`;
+}
+
+function resolveSnippetVariables(insertText, language, fileName) {
+  if (typeof insertText !== 'string') {
+    return insertText;
+  }
+
+  const resolvedFileName = getSnippetFileName(language, fileName);
+  const fileBase = getSnippetFileBase(resolvedFileName);
+  const className = getSnippetClassName(language, resolvedFileName);
+
+  return insertText
+    .replace(/\$classname\b/gi, className)
+    .replace(/\$filename_base\b/gi, fileBase)
+    .replace(/\$filename\b/gi, resolvedFileName);
+}
 
 const COMPLETION_KIND_MAP = {
   1: 'Text',
@@ -321,6 +487,69 @@ function normalizeSnippetInsertText(language, insertText) {
   return insertText;
 }
 
+function getCompletionFilterPrefix(model, position) {
+  return model?.getWordUntilPosition?.(position)?.word || '';
+}
+
+function getCompletionItemLeadText(item) {
+  const textEditText = item?.textEdit?.newText;
+  if (typeof textEditText === 'string' && textEditText) {
+    return textEditText;
+  }
+  if (typeof item?.insertText === 'string' && item.insertText) {
+    return item.insertText;
+  }
+  if (typeof item?.label === 'string') {
+    return item.label;
+  }
+  if (typeof item?.label?.label === 'string') {
+    return item.label.label;
+  }
+  return '';
+}
+
+function shouldIncludeCompletionItem(language, prefix, item) {
+  if (language !== 'python' || prefix.startsWith('_')) {
+    return true;
+  }
+  return !getCompletionItemLeadText(item).startsWith('__');
+}
+
+function buildPresetSnippetSuggestions(monaco, language, model, position, fileName = null) {
+  const snippets = [...(LANGUAGE_SNIPPETS[language] || []), ...loadCustomSnippets(language)];
+  if (snippets.length === 0) {
+    return [];
+  }
+
+  const wordInfo = model.getWordUntilPosition(position);
+  const prefix = (wordInfo?.word || '').toLowerCase();
+  if (!prefix) {
+    return [];
+  }
+
+  return snippets
+    .filter((snippet) => snippet.prefix.toLowerCase().startsWith(prefix))
+    .map((snippet) => ({
+      label: {
+        label: snippet.label,
+        description: snippet.detail
+      },
+      kind: monaco.languages.CompletionItemKind.Snippet,
+      detail: snippet.detail,
+      insertText: resolveSnippetVariables(snippet.insertText, language, fileName),
+      insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+      filterText: snippet.prefix,
+      sortText: `0000-${snippet.prefix}`,
+      preselect: snippet.prefix.toLowerCase() === prefix,
+      range: {
+        startLineNumber: position.lineNumber,
+        startColumn: wordInfo?.startColumn || position.column,
+        endLineNumber: position.lineNumber,
+        endColumn: wordInfo?.endColumn || position.column
+      }
+    }));
+}
+
 function simplifyLspServerMessage(raw, language) {
   let line = String(raw || '').trim();
   if (!line) {
@@ -468,6 +697,7 @@ export class LSPClient {
     this.semanticTokensEmitter = new this.monaco.Emitter();
 
     const resolvedFileName = fileName || FILE_NAME_BY_LANG[language] || `main.${EXT_BY_LANG[language]}`;
+    this.fileName = resolvedFileName;
     this.uri = `${this.workspaceUri}/${resolvedFileName}`;
     this.disposables.push(this.semanticTokensEmitter);
   }
@@ -629,6 +859,7 @@ export class LSPClient {
     this.model = model;
     this.languageId = languageId;
     this.workspaceUri = nextWorkspaceUri;
+    this.fileName = resolvedFileName;
     this.uri = nextUri;
     this.docVersion = 1;
     if (!sameModel) {
@@ -888,6 +1119,18 @@ export class LSPClient {
   }
 
   registerProviders(capabilities = {}) {
+    const snippetCompletionDisposable = this.monaco.languages.registerCompletionItemProvider(this.languageId, {
+      provideCompletionItems: (model, position) => {
+        if (model !== this.model) {
+          return { suggestions: [] };
+        }
+
+        return {
+          suggestions: buildPresetSnippetSuggestions(this.monaco, this.language, model, position, this.fileName)
+        };
+      }
+    });
+
     const importCompletionDisposable = this.monaco.languages.registerCompletionItemProvider(
       this.languageId,
       {
@@ -919,7 +1162,7 @@ export class LSPClient {
     );
 
     const completionDisposable = this.monaco.languages.registerCompletionItemProvider(this.languageId, {
-      triggerCharacters: ['.', '>', ':'],
+      triggerCharacters: this.language === 'python' ? ['.', '>'] : ['.', '>', ':'],
       provideCompletionItems: async (model, position) => {
         if (model !== this.model || !this.isReady) {
           return { suggestions: [] };
@@ -936,9 +1179,10 @@ export class LSPClient {
           });
 
           const items = Array.isArray(response) ? response : response?.items ?? [];
+          const prefix = getCompletionFilterPrefix(model, position);
 
           return {
-            suggestions: items.map((item) => {
+            suggestions: items.filter((item) => shouldIncludeCompletionItem(this.language, prefix, item)).map((item) => {
               const textEdit = item.textEdit?.newText ? item.textEdit : null;
               const insertText = normalizeSnippetInsertText(
                 this.language,
@@ -1023,7 +1267,7 @@ export class LSPClient {
       }
     });
 
-    this.disposables.push(importCompletionDisposable, completionDisposable, hoverDisposable);
+    this.disposables.push(snippetCompletionDisposable, importCompletionDisposable, completionDisposable, hoverDisposable);
 
     const semanticProvider = capabilities.semanticTokensProvider;
     const legend = semanticProvider?.legend;

@@ -207,6 +207,113 @@ body,
   color: #ff7b72;
 }
 
+.preset-manager-modal {
+  width: min(860px, 100%);
+}
+
+.preset-toolbar {
+  display: flex;
+  gap: 10px;
+  padding: 0 16px 14px;
+}
+
+.preset-language-select {
+  margin-top: 0;
+}
+
+.preset-manager-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 0 16px 8px;
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  padding-right: 4px;
+  overflow: auto;
+}
+
+.preset-list-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #3c3c3c;
+  border-radius: 10px;
+  background: #121212;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.preset-list-item:hover {
+  border-color: #5a5a5a;
+  background: #181818;
+}
+
+.preset-list-item.active {
+  border-color: var(--accent);
+  background: rgba(14, 99, 156, 0.16);
+}
+
+.preset-list-item-new {
+  border-style: dashed;
+  background: linear-gradient(180deg, rgba(14, 99, 156, 0.12), rgba(14, 99, 156, 0.04));
+}
+
+.preset-list-item-new:hover {
+  border-color: #5d91b2;
+  background: linear-gradient(180deg, rgba(14, 99, 156, 0.18), rgba(14, 99, 156, 0.08));
+}
+
+.preset-list-prefix {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f2f2f2;
+}
+
+.preset-list-description,
+.preset-empty-state,
+.preset-help-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.preset-empty-state {
+  padding: 12px;
+  border: 1px dashed #3c3c3c;
+  border-radius: 10px;
+  background: #121212;
+}
+
+.preset-editor {
+  display: flex;
+  flex-direction: column;
+}
+
+.preset-field-gap {
+  margin-top: 10px;
+}
+
+.preset-body-editor {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid #3c3c3c;
+  border-radius: 10px;
+  background: #111111;
+}
+
+.preset-help-text {
+  margin-top: 10px;
+  white-space: pre-line;
+}
+
 .workspace {
   display: flex;
   gap: 0;
@@ -885,6 +992,16 @@ body,
   .control-btn {
     flex: 0 0 auto;
     padding: 9px 14px;
+  }
+
+  .preset-toolbar,
+  .preset-manager-layout {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .preset-list {
+    max-height: 180px;
   }
 
   .workspace {

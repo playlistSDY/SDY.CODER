@@ -92,6 +92,7 @@ const DEFAULT_LANGUAGE = LANGUAGES[0].id;
 const LAST_LANGUAGE_STORAGE_KEY = 'web-vscode:last-language';
 const GUEST_FILES_STORAGE_KEY = 'web-vscode:guest-files';
 const GUEST_SELECTED_FILE_ID_STORAGE_KEY = 'web-vscode:guest-selected-file-id';
+const CUSTOM_SNIPPETS_STORAGE_KEY = 'web-vscode:custom-snippets';
 const EXPLORER_WIDTH_STORAGE_KEY = 'web-vscode:explorer-width';
 const SIDE_PANE_WIDTH_STORAGE_KEY = 'web-vscode:side-pane-width';
 const SIDE_PANE_HEIGHT_STORAGE_KEY = 'web-vscode:side-pane-height';
@@ -133,6 +134,63 @@ function saveLastLanguage(lang) {
   }
   try {
     window.localStorage.setItem(LAST_LANGUAGE_STORAGE_KEY, lang);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function createEmptyCustomSnippet(languageId = DEFAULT_LANGUAGE) {
+  return {
+    id: null,
+    language: isSupportedLanguage(languageId) ? languageId : DEFAULT_LANGUAGE,
+    prefix: '',
+    description: '',
+    body: ''
+  };
+}
+
+function normalizeCustomSnippetPrefix(prefix) {
+  return String(prefix || '').trim();
+}
+
+function loadCustomSnippets() {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_SNIPPETS_STORAGE_KEY);
+    const parsed = JSON.parse(raw || '[]');
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter(
+        (entry) =>
+          entry &&
+          typeof entry.id === 'string' &&
+          isSupportedLanguage(entry.language) &&
+          typeof entry.prefix === 'string' &&
+          typeof entry.body === 'string'
+      )
+      .map((entry) => ({
+        id: entry.id,
+        language: entry.language,
+        prefix: normalizeCustomSnippetPrefix(entry.prefix),
+        description: typeof entry.description === 'string' ? entry.description : '',
+        body: entry.body
+      }))
+      .filter((entry) => entry.prefix && entry.body);
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomSnippets(snippets) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(CUSTOM_SNIPPETS_STORAGE_KEY, JSON.stringify(snippets));
   } catch {
     // Ignore storage errors.
   }
@@ -267,6 +325,22 @@ function saveUserSelectedFileId(userId, fileId) {
   }
 }
 
+function shouldIgnoreRunShortcutTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target.closest('.monaco-editor')) {
+    return true;
+  }
+  const tagName = target.tagName;
+  return (
+    tagName === 'INPUT' ||
+    tagName === 'TEXTAREA' ||
+    tagName === 'SELECT' ||
+    target.closest('[contenteditable="true"]') !== null
+  );
+}
+
 function loadSidePaneWidth() {
   if (typeof window === 'undefined') {
     return DEFAULT_SIDE_PANE_WIDTH_PX;
@@ -350,6 +424,13 @@ function saveSidePaneHeight(height) {
 
 function getFileNameForLanguage(languageId) {
   return FILE_NAME_BY_LANG[languageId] || `main.${EXT_BY_LANG[languageId]}`;
+}
+
+function getPresetPreviewFileName(languageId, activeFileName = null) {
+  const baseName = typeof activeFileName === 'string' && activeFileName.trim()
+    ? activeFileName.replace(/\.[^.]+$/, '')
+    : getFileNameForLanguage(languageId).replace(/\.[^.]+$/, '');
+  return normalizeFileName(baseName, languageId);
 }
 
 function getJavaPrimaryTypeName(fileName) {
@@ -653,6 +734,11 @@ export default function App() {
   const [rootDropActive, setRootDropActive] = useState(false);
   const [collapsedFolderIds, setCollapsedFolderIds] = useState(() => new Set());
   const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [presetManagerModalOpen, setPresetManagerModalOpen] = useState(false);
+  const [customSnippets, setCustomSnippets] = useState(() => loadCustomSnippets());
+  const [presetFilterLanguage, setPresetFilterLanguage] = useState(() => loadLastLanguage());
+  const [presetDraft, setPresetDraft] = useState(() => createEmptyCustomSnippet(loadLastLanguage()));
+  const [presetModalError, setPresetModalError] = useState('');
   const [explorerWidth, setExplorerWidth] = useState(() => loadExplorerWidth());
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const [saveState, setSaveState] = useState('saved');
@@ -689,6 +775,16 @@ export default function App() {
   const lspSessionRef = useRef(0);
   const saveTimersRef = useRef(new Map());
   const stdinSaveTimersRef = useRef(new Map());
+  const runActionRef = useRef(() => {});
+  const stopActionRef = useRef(() => {});
+  const runningRef = useRef(false);
+  const activeFileRef = useRef(null);
+  const presetEditorRef = useRef(null);
+  const presetMonacoRef = useRef(null);
+  const presetModelRef = useRef(null);
+  const presetModelListenerRef = useRef(null);
+  const presetLspRef = useRef(null);
+  const presetLspSessionRef = useRef(0);
   const selectedFileIdRef = useRef(null);
   const filesRef = useRef([]);
   const foldersRef = useRef([]);
@@ -724,6 +820,12 @@ export default function App() {
   const canCreateFile = Boolean(newFileName.trim()) && !createNameTaken && !createHasDot;
   const rootFiles = sortFilesByName(files.filter((file) => !file.folderId));
   const sortedFolders = sortFoldersByName(folders);
+  const filteredCustomSnippets = customSnippets
+    .filter((snippet) => snippet.language === presetFilterLanguage)
+    .sort((a, b) => a.prefix.localeCompare(b.prefix, undefined, { sensitivity: 'base' }));
+  const editingCustomSnippet = presetDraft.id
+    ? customSnippets.find((snippet) => snippet.id === presetDraft.id) || null
+    : null;
 
   const makeTimestamp = () => {
     const now = new Date();
@@ -768,6 +870,38 @@ export default function App() {
       throw new Error(payload.error || 'Request failed');
     }
     return payload;
+  };
+
+  const delay = (ms) =>
+    new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+
+  const resolveAuthenticatedSession = async (fallbackUser = null) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const payload = await fetchJson('/api/auth/session', {
+          headers: { 'Cache-Control': 'no-store' }
+        });
+        if (payload.user) {
+          return payload.user;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+
+      if (attempt < 3) {
+        await delay(150 * (attempt + 1));
+      }
+    }
+
+    if (fallbackUser) {
+      appendLog('auth session confirmation timed out; continuing with login response');
+      return fallbackUser;
+    }
+
+    throw lastError || new Error('authenticated session is not ready');
   };
 
   const clearPendingSaveTimers = () => {
@@ -1062,12 +1196,124 @@ export default function App() {
     nextClient.start();
   };
 
+  const disposePresetEditorResources = async () => {
+    if (presetLspRef.current) {
+      await presetLspRef.current.stop();
+      presetLspRef.current = null;
+    }
+    presetLspSessionRef.current += 1;
+    if (presetModelListenerRef.current) {
+      presetModelListenerRef.current.dispose();
+      presetModelListenerRef.current = null;
+    }
+    if (presetModelRef.current) {
+      presetModelRef.current.dispose();
+      presetModelRef.current = null;
+    }
+    if (presetEditorRef.current) {
+      presetEditorRef.current.setModel(null);
+    }
+  };
+
+  const ensurePresetEditorModel = () => {
+    const monaco = presetMonacoRef.current;
+    const editor = presetEditorRef.current;
+    if (!monaco || !editor || !presetManagerModalOpen) {
+      return null;
+    }
+
+    const previewFile = {
+      id: `preset-draft:${presetDraft.language}`,
+      name: getPresetPreviewFileName(presetDraft.language, activeFile?.name),
+      language: presetDraft.language
+    };
+    const modelUri = getModelUri(monaco, previewFile);
+    const existing = presetModelRef.current;
+    const expectedLanguage = getMonacoLanguageForLanguage(presetDraft.language);
+    const sameUri = existing && String(existing.uri) === String(modelUri);
+    const sameLanguage = existing && existing.getLanguageId() === expectedLanguage;
+
+    if (!existing || !sameUri || !sameLanguage) {
+      if (presetModelListenerRef.current) {
+        presetModelListenerRef.current.dispose();
+        presetModelListenerRef.current = null;
+      }
+      if (existing) {
+        existing.dispose();
+      }
+      const nextModel = monaco.editor.createModel(presetDraft.body || '', expectedLanguage, modelUri);
+      presetModelListenerRef.current = nextModel.onDidChangeContent(() => {
+        const nextBody = nextModel.getValue();
+        setPresetDraft((prev) => (prev.body === nextBody ? prev : { ...prev, body: nextBody }));
+      });
+      presetModelRef.current = nextModel;
+    } else if (existing.getValue() !== presetDraft.body) {
+      existing.setValue(presetDraft.body || '');
+    }
+
+    const model = presetModelRef.current;
+    if (editor.getModel() !== model) {
+      editor.setModel(model);
+    }
+    return { model, previewFile };
+  };
+
+  const bootPresetEditorLsp = async () => {
+    const context = ensurePresetEditorModel();
+    if (!context || !presetMonacoRef.current) {
+      return;
+    }
+
+    const { model, previewFile } = context;
+    const workspaceUri = `${getLspWorkspaceUri(presetDraft.language)}/preset-draft`;
+    if (presetLspRef.current && presetLspRef.current.language === presetDraft.language) {
+      presetLspRef.current.switchDocument({
+        model,
+        languageId: model.getLanguageId(),
+        fileName: previewFile.name,
+        workspaceUri
+      });
+      return;
+    }
+
+    const sessionId = presetLspSessionRef.current + 1;
+    presetLspSessionRef.current = sessionId;
+
+    if (presetLspRef.current) {
+      await presetLspRef.current.stop();
+      presetLspRef.current = null;
+    }
+
+    const nextClient = new LSPClient({
+      monaco: presetMonacoRef.current,
+      language: presetDraft.language,
+      languageId: model.getLanguageId(),
+      model,
+      fileName: previewFile.name,
+      workspaceUri,
+      onLog: null,
+      isActive: () => presetLspSessionRef.current === sessionId && presetLspRef.current === nextClient
+    });
+    presetLspRef.current = nextClient;
+    nextClient.start();
+  };
+
   const onEditorMount = (editor, monaco) => {
     editorRef.current = editor;
     monacoRef.current = monaco;
 
     defineDarkModernTheme(monaco);
     monaco.editor.setTheme('vscode-dark-modern');
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+      if (!activeFileRef.current) {
+        return;
+      }
+      if (runningRef.current) {
+        stopActionRef.current();
+        return;
+      }
+      runActionRef.current();
+    });
 
     if (!workspaceReady) {
       return;
@@ -1085,6 +1331,15 @@ export default function App() {
     modelStorageDisposablesRef.current.push(editor.onDidFocusEditorText(() => updateEditorStatusFromEditor(editor)));
     modelStorageDisposablesRef.current.push(editor.onDidBlurEditorText(() => updateEditorStatusFromEditor(editor)));
     modelStorageDisposablesRef.current.push(editor.onDidChangeModel(() => updateEditorStatusFromEditor(editor)));
+  };
+
+  const onPresetEditorMount = (editor, monaco) => {
+    presetEditorRef.current = editor;
+    presetMonacoRef.current = monaco;
+
+    defineDarkModernTheme(monaco);
+    monaco.editor.setTheme('vscode-dark-modern');
+    void bootPresetEditorLsp();
   };
 
   useEffect(() => {
@@ -1106,6 +1361,34 @@ export default function App() {
   useEffect(() => {
     stdinTextRef.current = stdinText;
   }, [stdinText]);
+
+  useEffect(() => {
+    runningRef.current = running;
+  }, [running]);
+
+  useEffect(() => {
+    activeFileRef.current = activeFile;
+  }, [activeFile]);
+
+  useEffect(() => {
+    if (!presetManagerModalOpen) {
+      void disposePresetEditorResources();
+      return undefined;
+    }
+    void bootPresetEditorLsp();
+    return undefined;
+  }, [presetManagerModalOpen, presetDraft.language, activeFile?.name]);
+
+  useEffect(() => {
+    if (!presetManagerModalOpen) {
+      return;
+    }
+    ensurePresetEditorModel();
+  }, [presetManagerModalOpen, presetDraft.body]);
+
+  useEffect(() => () => {
+    void disposePresetEditorResources();
+  }, []);
 
   useEffect(() => {
     if (selectedFile?.language && selectedFile.language !== language) {
@@ -1344,7 +1627,8 @@ export default function App() {
                 method: 'POST',
                 body: JSON.stringify({ credential: response.credential })
               });
-              setUser(payload.user || null);
+              const confirmedUser = await resolveAuthenticatedSession(payload.user || null);
+              setUser(confirmedUser);
               setLoginPromptOpen(false);
             } catch (error) {
               appendLog(`login failed: ${error.message}`);
@@ -2055,6 +2339,39 @@ export default function App() {
     }
   };
 
+  runActionRef.current = runCode;
+  stopActionRef.current = stopRun;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.isComposing || event.repeat) {
+        return;
+      }
+      if (event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) {
+        return;
+      }
+      if (!activeFile || shouldIgnoreRunShortcutTarget(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+      if (running) {
+        stopRun();
+        return;
+      }
+      runCode();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [activeFile, running, runCode, stopRun]);
+
   const handleLogout = async () => {
     try {
       await flushPendingFileSaves();
@@ -2072,6 +2389,7 @@ export default function App() {
     setUser(null);
     setRenameFileModalOpen(false);
     setCreateFileModalOpen(false);
+    setPresetManagerModalOpen(false);
     setLoginPromptOpen(false);
     clearPendingSaveTimers();
     modelsRef.current.forEach((model) => model.dispose());
@@ -2493,6 +2811,107 @@ export default function App() {
     setResetModalOpen(false);
   };
 
+  const openPresetManagerModal = () => {
+    const nextLanguage = activeFile?.language || language;
+    setPresetFilterLanguage(nextLanguage);
+    setPresetDraft(createEmptyCustomSnippet(nextLanguage));
+    setPresetModalError('');
+    setPresetManagerModalOpen(true);
+  };
+
+  const closePresetManagerModal = () => {
+    setPresetManagerModalOpen(false);
+    setPresetModalError('');
+    setPresetDraft(createEmptyCustomSnippet(presetFilterLanguage));
+  };
+
+  const startNewPresetDraft = (languageId = presetFilterLanguage) => {
+    setPresetDraft(createEmptyCustomSnippet(languageId));
+    setPresetModalError('');
+  };
+
+  const handlePresetFilterLanguageChange = (nextLanguage) => {
+    setPresetFilterLanguage(nextLanguage);
+    setPresetDraft(createEmptyCustomSnippet(nextLanguage));
+    setPresetModalError('');
+  };
+
+  const selectPresetForEdit = (snippet) => {
+    setPresetDraft({
+      id: snippet.id,
+      language: snippet.language,
+      prefix: snippet.prefix,
+      description: snippet.description || '',
+      body: snippet.body
+    });
+    setPresetFilterLanguage(snippet.language);
+    setPresetModalError('');
+  };
+
+  const savePresetDraft = () => {
+    const isCreating = !presetDraft.id;
+    const normalizedPrefix = normalizeCustomSnippetPrefix(presetDraft.prefix);
+    const normalizedBody = presetDraft.body.replace(/\r\n/g, '\n').trimEnd();
+
+    if (!normalizedPrefix) {
+      setPresetModalError('단축어(prefix)를 입력해야 합니다.');
+      return;
+    }
+    if (/\s/.test(normalizedPrefix)) {
+      setPresetModalError('단축어에는 공백을 넣을 수 없습니다.');
+      return;
+    }
+    if (!normalizedBody.trim()) {
+      setPresetModalError('프리셋 본문을 입력해야 합니다.');
+      return;
+    }
+
+    const hasDuplicate = customSnippets.some(
+      (snippet) =>
+        snippet.id !== presetDraft.id &&
+        snippet.language === presetDraft.language &&
+        snippet.prefix.localeCompare(normalizedPrefix, undefined, { sensitivity: 'base' }) === 0
+    );
+    if (hasDuplicate) {
+      setPresetModalError('같은 언어에 같은 단축어가 이미 있습니다.');
+      return;
+    }
+
+    const nextSnippet = {
+      id: presetDraft.id || `snippet:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      language: presetDraft.language,
+      prefix: normalizedPrefix,
+      description: String(presetDraft.description || '').trim(),
+      body: normalizedBody
+    };
+
+    const nextSnippets = presetDraft.id
+      ? customSnippets.map((snippet) => (snippet.id === presetDraft.id ? nextSnippet : snippet))
+      : [...customSnippets, nextSnippet];
+
+    setCustomSnippets(nextSnippets);
+    saveCustomSnippets(nextSnippets);
+    setPresetFilterLanguage(nextSnippet.language);
+    setPresetDraft(nextSnippet);
+    setPresetModalError('');
+    appendLog(`preset saved: ${nextSnippet.language}/${nextSnippet.prefix}`);
+    if (isCreating) {
+      closePresetManagerModal();
+    }
+  };
+
+  const deletePresetDraft = () => {
+    if (!presetDraft.id) {
+      startNewPresetDraft(presetFilterLanguage);
+      return;
+    }
+    const nextSnippets = customSnippets.filter((snippet) => snippet.id !== presetDraft.id);
+    setCustomSnippets(nextSnippets);
+    saveCustomSnippets(nextSnippets);
+    appendLog(`preset deleted: ${presetDraft.language}/${presetDraft.prefix}`);
+    startNewPresetDraft(presetDraft.language);
+  };
+
   const resetCurrentCode = () => {
     const model = activeFile ? modelsRef.current.get(activeFile.id) : null;
     const editor = editorRef.current;
@@ -2601,6 +3020,9 @@ export default function App() {
           <span>SDY.CODER</span>
         </div>
         <div className="controls">
+          <button type="button" className="control-btn secondary-btn" onClick={openPresetManagerModal}>
+            Presets
+          </button>
           <button
             type="button"
             className="control-btn danger-btn"
@@ -2614,6 +3036,8 @@ export default function App() {
             className={`run-btn${running ? ' stop-btn' : ''}`}
             onClick={running ? stopRun : runCode}
             disabled={!activeFile}
+            title={running ? 'Stop (Ctrl/Cmd+Enter)' : 'Run (Ctrl/Cmd+Enter)'}
+            aria-keyshortcuts="Control+Enter Meta+Enter"
           >
             {running ? 'Stop' : 'Run'}
           </button>
@@ -2885,40 +3309,39 @@ export default function App() {
 
         <section className="editor-pane">
           <div className={`editor-surface${!hasFiles ? ' editor-surface-empty' : ''}`}>
-            {workspaceReady ? (
-              <Editor
-                height="100%"
-                defaultLanguage="plaintext"
-                defaultValue=""
-                theme="vscode-dark-modern"
-                onMount={onEditorMount}
-                options={{
-                  minimap: { enabled: false },
-                  'semanticHighlighting.enabled': true,
-                  fontSize: 14,
-                  fontLigatures: true,
-                  smoothScrolling: true,
-                  automaticLayout: true,
-                  tabSize: 4,
-                  insertSpaces: true,
-                  lineNumbersMinChars: 3,
-                  tabCompletion: 'on',
-                  snippetSuggestions: 'inline',
-                  acceptSuggestionOnEnter: 'on',
-                  readOnly: !activeFile,
-                  domReadOnly: !activeFile,
-                  suggest: {
-                    showSnippets: true,
-                    snippetsPreventQuickSuggestions: false
-                  }
-                }}
-              />
-            ) : (
+            <Editor
+              height="100%"
+              defaultLanguage="plaintext"
+              defaultValue=""
+              theme="vscode-dark-modern"
+              onMount={onEditorMount}
+              options={{
+                minimap: { enabled: false },
+                'semanticHighlighting.enabled': true,
+                fontSize: 14,
+                fontLigatures: true,
+                smoothScrolling: true,
+                automaticLayout: true,
+                tabSize: 4,
+                insertSpaces: true,
+                lineNumbersMinChars: 3,
+                tabCompletion: 'on',
+                snippetSuggestions: 'inline',
+                acceptSuggestionOnEnter: 'on',
+                readOnly: !activeFile,
+                domReadOnly: !activeFile,
+                suggest: {
+                  showSnippets: true,
+                  snippetsPreventQuickSuggestions: false
+                }
+              }}
+            />
+            {!workspaceReady ? (
               <div className="editor-empty-state">
                 <div className="editor-empty-state-title">워크스페이스 불러오는 중...</div>
                 <div className="editor-empty-state-body">코드와 LSP를 준비하고 있습니다.</div>
               </div>
-            )}
+            ) : null}
             {workspaceReady && !hasFiles ? (
               <div className="editor-empty-state">
                 <div className="editor-empty-state-title">파일이 없습니다</div>
@@ -3009,6 +3432,122 @@ export default function App() {
           </div>
         </section>
       </main>
+      {presetManagerModalOpen ? (
+        <div className="modal-backdrop" onClick={closePresetManagerModal}>
+          <div
+            className="confirm-modal preset-manager-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="preset-manager-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="preset-manager-title">
+              Preset Manager
+            </div>
+            <div className="confirm-modal-body">
+              단축어를 직접 만들고, 자동완성에서 `Tab` 또는 `Enter`로 바로 펼칠 수 있습니다.
+            </div>
+            <div className="preset-toolbar">
+              <select
+                className="file-name-input preset-language-select"
+                value={presetFilterLanguage}
+                onChange={(event) => handlePresetFilterLanguageChange(event.target.value)}
+              >
+                {LANGUAGES.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.versionLabel ? `${item.label} ${item.versionLabel}` : item.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="preset-manager-layout">
+              <div className="preset-list">
+                <button
+                  type="button"
+                  className={`preset-list-item preset-list-item-new${!presetDraft.id ? ' active' : ''}`}
+                  onClick={() => startNewPresetDraft(presetFilterLanguage)}
+                >
+                  <span className="preset-list-prefix">+ New Preset</span>
+                  <span className="preset-list-description">새 단축어와 템플릿을 추가합니다.</span>
+                </button>
+                {filteredCustomSnippets.length === 0 ? (
+                  <div className="preset-empty-state">이 언어에 저장된 사용자 프리셋이 아직 없습니다.</div>
+                ) : (
+                  filteredCustomSnippets.map((snippet) => (
+                    <button
+                      key={snippet.id}
+                      type="button"
+                      className={`preset-list-item${snippet.id === editingCustomSnippet?.id ? ' active' : ''}`}
+                      onClick={() => selectPresetForEdit(snippet)}
+                    >
+                      <span className="preset-list-prefix">{snippet.prefix}</span>
+                      <span className="preset-list-description">{snippet.description || 'Custom preset'}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+              <div className="preset-editor">
+                <input
+                  className="file-name-input"
+                  value={presetDraft.prefix}
+                  onChange={(event) => {
+                    setPresetDraft((prev) => ({ ...prev, prefix: event.target.value }));
+                    if (presetModalError) {
+                      setPresetModalError('');
+                    }
+                  }}
+                  placeholder="Shortcut, for example pvsm"
+                />
+                <input
+                  className="file-name-input preset-field-gap"
+                  value={presetDraft.description}
+                  onChange={(event) => setPresetDraft((prev) => ({ ...prev, description: event.target.value }))}
+                  placeholder="Description shown in completion list"
+                />
+                <div className="preset-body-editor">
+                  <Editor
+                    height="260px"
+                    defaultLanguage="plaintext"
+                    defaultValue=""
+                    theme="vscode-dark-modern"
+                    onMount={onPresetEditorMount}
+                    options={{
+                      minimap: { enabled: false },
+                      'semanticHighlighting.enabled': true,
+                      fontSize: 13,
+                      fontLigatures: true,
+                      smoothScrolling: true,
+                      automaticLayout: true,
+                      tabSize: 2,
+                      insertSpaces: true,
+                      lineNumbersMinChars: 3,
+                      tabCompletion: 'on',
+                      snippetSuggestions: 'inline',
+                      acceptSuggestionOnEnter: 'on'
+                    }}
+                  />
+                </div>
+                <div className="preset-help-text">
+                  예: Java는 `pvsm`, Python은 `ifmain` 같은 단축어를 만들 수 있습니다.
+                  ` $0 `, ` $1 ` 탭스톱과 ` $classname `, ` $filename `, ` $filename_base ` 변수도 사용할 수 있습니다.
+                </div>
+              </div>
+            </div>
+            {presetModalError ? <div className="confirm-modal-body modal-error">{presetModalError}</div> : null}
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn secondary-btn" onClick={closePresetManagerModal}>
+                Close
+              </button>
+              <button type="button" className="control-btn danger-btn" onClick={deletePresetDraft} disabled={!presetDraft.id}>
+                Delete
+              </button>
+              <button type="button" className="control-btn primary-btn" onClick={savePresetDraft}>
+                {presetDraft.id ? 'Save' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {resetModalOpen ? (
         <div className="modal-backdrop" onClick={closeResetModal}>
           <div
