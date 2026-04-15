@@ -105,7 +105,7 @@ const WORKSPACE_RESIZER_MIN_SIDE_PX = 280;
 const WORKSPACE_RESIZER_MIN_EDITOR_HEIGHT_PX = 260;
 const WORKSPACE_RESIZER_MIN_SIDE_HEIGHT_PX = 220;
 const RESIZER_HEIGHT_PX = 8;
-const DEFAULT_PANEL_RATIOS = [0.26, 0.62, 0.12];
+const DEFAULT_PANEL_RATIOS = [0.28, 0.72, 0];
 const MIN_PANEL_HEIGHT_PX = 96;
 const LEGACY_CSHARP_STARTER =
   `using System;\n\npublic class Main {\n    public static void Main(string[] args) {\n        Console.WriteLine(\"Hello, C#\");\n    }\n}\n`;
@@ -578,64 +578,46 @@ function formatBytes(bytes) {
   return `${value.toFixed(2)} ${units[idx]}`;
 }
 
-function buildStatusBlock(
-  containerOpenMs,
-  compileMs,
-  executionMs,
-  sandboxCpuPercent = null,
-  sandboxCpuLimit = null,
-  sandboxMemoryPeakBytes = null,
-  sandboxMemoryLimitBytes = null,
-  queueWaitMs = null,
-  queuePositionAtEnqueue = null
-) {
-  const lines = ['[status]'];
-
-  const shouldShowQueueWait = typeof queueWaitMs === 'number' && queueWaitMs > 0;
-
-  if (shouldShowQueueWait) {
-    const wait = typeof queueWaitMs === 'number' ? formatDurationWithSeconds(queueWaitMs) : 'N/A';
-    if (typeof queuePositionAtEnqueue === 'number') {
-      lines.push(`Queue wait: ${wait} / position #${queuePositionAtEnqueue}`);
-    } else {
-      lines.push(`Queue wait: ${wait}`);
-    }
-  }
-
-  lines.push(
-    Number.isFinite(containerOpenMs)
-      ? `Opening container: ${formatDurationWithSeconds(containerOpenMs)}`
-      : 'Opening container: N/A'
-  );
-
-  if (typeof compileMs === 'number') {
-    lines.push(`Compile time: ${formatDurationWithSeconds(compileMs)}`);
-  }
-
-  lines.push(
-    typeof executionMs === 'number'
-      ? `Code execution time: ${formatDurationWithSeconds(executionMs)}`
-      : 'Code execution time: N/A'
-  );
-
-  if (typeof sandboxMemoryPeakBytes === 'number' || typeof sandboxMemoryLimitBytes === 'number') {
-    lines.push(
-      `Memory peak: ${formatBytes(sandboxMemoryPeakBytes)} / max ${formatBytes(sandboxMemoryLimitBytes)}`
-    );
-  }
-
-  return lines.join('\n');
-}
-
-function buildOutputText(statusBlock, stdout = '', stderr = '', error = '') {
+function buildOutputText(stdout = '', stderr = '', error = '') {
   return [
-    statusBlock,
     stdout ? `[stdout]\n${stdout}` : '',
     stderr ? `[stderr]\n${stderr}` : '',
     error ? `[error]\n${error}` : ''
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+function buildRunSummary({
+  status = 'idle',
+  containerOpenMs = null,
+  compileMs = null,
+  executionMs = null,
+  sandboxCpuPercent = null,
+  sandboxMemoryPeakBytes = null,
+  queueWaitMs = null,
+  queuePositionAtEnqueue = null
+} = {}) {
+  return {
+    status,
+    queueWaitMs,
+    queuePositionAtEnqueue,
+    containerOpenMs,
+    compileMs,
+    executionMs,
+    sandboxCpuPercent,
+    sandboxMemoryPeakBytes
+  };
+}
+
+function formatSummaryDuration(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+    return null;
+  }
+  if (ms >= 1000) {
+    return `${(ms / 1000).toFixed(3)}s`;
+  }
+  return `${ms.toFixed(0)}ms`;
 }
 
 function defineDarkModernTheme(monaco) {
@@ -697,6 +679,7 @@ export default function App() {
   const [language, setLanguage] = useState(() => loadLastLanguage());
   const [stdinText, setStdinText] = useState('');
   const [output, setOutput] = useState('');
+  const [runSummary, setRunSummary] = useState(() => buildRunSummary());
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [authLoading, setAuthLoading] = useState(true);
@@ -753,7 +736,7 @@ export default function App() {
   const [sidePaneHeight, setSidePaneHeight] = useState(() => loadSidePaneHeight());
   const [panelRatios, setPanelRatios] = useState(DEFAULT_PANEL_RATIOS);
   const [isMobileView, setIsMobileView] = useState(() =>
-    typeof window !== 'undefined' ? window.matchMedia('(max-width: 900px)').matches : false
+    typeof window !== 'undefined' ? window.matchMedia('(max-width: 500px)').matches : false
   );
 
   const workspaceRef = useRef(null);
@@ -837,6 +820,7 @@ export default function App() {
   const appendLogWithId = (line) => {
     const id = `log-${Date.now()}-${logCounterRef.current++}`;
     const timestamp = makeTimestamp();
+    console.info(`[SDY.CODER ${timestamp}] ${line}`);
     setLogs((prev) => [...prev.slice(-120), { id, timestamp, text: line }]);
     return id;
   };
@@ -909,6 +893,27 @@ export default function App() {
     saveTimersRef.current.clear();
     stdinSaveTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     stdinSaveTimersRef.current.clear();
+  };
+
+  const resetEditorWorkspaceState = () => {
+    clearPendingSaveTimers();
+    modelStorageDisposablesRef.current.forEach((disposable) => disposable.dispose());
+    modelStorageDisposablesRef.current = [];
+    modelsRef.current.forEach((model) => model.dispose());
+    modelsRef.current.clear();
+    if (emptyModelRef.current) {
+      emptyModelRef.current.dispose();
+      emptyModelRef.current = null;
+    }
+    if (lspRef.current) {
+      lspRef.current.stop();
+      lspRef.current = null;
+    }
+    setFiles([]);
+    setFolders([]);
+    setSelectedFileId(null);
+    setStdinText('');
+    setOutput('');
   };
 
   const updateEditorStatusFromEditor = (editor) => {
@@ -1210,9 +1215,6 @@ export default function App() {
       presetModelRef.current.dispose();
       presetModelRef.current = null;
     }
-    if (presetEditorRef.current) {
-      presetEditorRef.current.setModel(null);
-    }
   };
 
   const ensurePresetEditorModel = () => {
@@ -1456,7 +1458,7 @@ export default function App() {
     if (typeof window === 'undefined') {
       return undefined;
     }
-    const mediaQuery = window.matchMedia('(max-width: 900px)');
+    const mediaQuery = window.matchMedia('(max-width: 500px)');
     const handleChange = (event) => {
       setIsMobileView(event.matches);
     };
@@ -1627,9 +1629,9 @@ export default function App() {
                 method: 'POST',
                 body: JSON.stringify({ credential: response.credential })
               });
-              const confirmedUser = await resolveAuthenticatedSession(payload.user || null);
-              setUser(confirmedUser);
-              setLoginPromptOpen(false);
+              await resolveAuthenticatedSession(payload.user || null);
+              window.location.reload();
+              return;
             } catch (error) {
               appendLog(`login failed: ${error.message}`);
             } finally {
@@ -1916,7 +1918,8 @@ export default function App() {
     }
 
     const totalHeight = container.getBoundingClientRect().height;
-    const availableHeight = totalHeight - RESIZER_HEIGHT_PX * 2;
+    const visibleResizerCount = 1;
+    const availableHeight = totalHeight - RESIZER_HEIGHT_PX * visibleResizerCount;
     if (availableHeight <= 0) {
       return;
     }
@@ -1937,6 +1940,7 @@ export default function App() {
   const runCode = async () => {
     if (!activeFile) {
       setOutput('No file selected');
+      setRunSummary(buildRunSummary({ status: 'idle' }));
       return;
     }
     try {
@@ -1986,18 +1990,17 @@ export default function App() {
       } else if (progress.phase === 'queue' && !progress.queueFrozen && progress.queueStartedAt) {
         progress.queueWaitMs = Number((now - progress.queueStartedAt).toFixed(3));
       }
-      const statusBlock = buildStatusBlock(
-        progress.openMs,
-        progress.compileMs,
-        progress.executionMs,
-        null,
-        null,
-        null,
-        null,
-        progress.queueWaitMs,
-        progress.queuePositionAtEnqueue
+      setRunSummary(
+        buildRunSummary({
+          status: 'running',
+          containerOpenMs: progress.openMs,
+          compileMs: progress.compileMs,
+          executionMs: progress.executionMs,
+          queueWaitMs: progress.queueWaitMs,
+          queuePositionAtEnqueue: progress.queuePositionAtEnqueue
+        })
       );
-      setOutput(buildOutputText(statusBlock, streamedStdout, streamedStderr));
+      setOutput(buildOutputText(streamedStdout, streamedStderr));
     };
 
     const formatQueueLogLine = (queueWaitMs, queuePositionAtEnqueue = null) => {
@@ -2010,6 +2013,7 @@ export default function App() {
 
     try {
       setRunning(true);
+      setRunSummary(buildRunSummary({ status: 'running' }));
       refreshProgressOutput();
       appendLog(`run requested (${activeFile.language})`);
       queueLogId = appendLogWithId('  queue waiting... 0 ms');
@@ -2254,20 +2258,21 @@ export default function App() {
       }
 
       if (!finalResult.ok) {
-        const statusBlock = buildStatusBlock(
-          containerOpenMs,
-          finalResult.compileMs,
-          finalResult.executionMs,
-          finalResult.sandboxCpuPercent,
-          finalResult.sandboxCpuLimit,
-          finalResult.sandboxMemoryPeakBytes,
-          finalResult.sandboxMemoryLimitBytes,
-          finalResult.queueWaitMs,
-          null
+        setRunSummary(
+          buildRunSummary({
+            status: 'failed',
+            containerOpenMs,
+            compileMs: finalResult.compileMs,
+            executionMs:
+              typeof finalResult.executionMs === 'number' ? finalResult.executionMs : progress.executionMs,
+            sandboxCpuPercent: finalResult.sandboxCpuPercent,
+            sandboxMemoryPeakBytes: finalResult.sandboxMemoryPeakBytes,
+            queueWaitMs:
+              typeof finalResult.queueWaitMs === 'number' ? finalResult.queueWaitMs : progress.queueWaitMs
+          })
         );
 
         const failureOutput = buildOutputText(
-          statusBlock,
           finalResult.stdout ?? streamedStdout,
           finalResult.stderr ?? streamedStderr,
           finalResult.error
@@ -2277,20 +2282,19 @@ export default function App() {
         return;
       }
 
-      const statusBlock = buildStatusBlock(
-        containerOpenMs,
-        finalResult.compileMs,
-        finalResult.executionMs,
-        finalResult.sandboxCpuPercent,
-        finalResult.sandboxCpuLimit,
-        finalResult.sandboxMemoryPeakBytes,
-        finalResult.sandboxMemoryLimitBytes,
-        finalResult.queueWaitMs,
-        null
+      setRunSummary(
+        buildRunSummary({
+          status: 'done',
+          containerOpenMs,
+          compileMs: finalResult.compileMs,
+          executionMs: finalResult.executionMs,
+          sandboxCpuPercent: finalResult.sandboxCpuPercent,
+          sandboxMemoryPeakBytes: finalResult.sandboxMemoryPeakBytes,
+          queueWaitMs: finalResult.queueWaitMs
+        })
       );
 
       const next = buildOutputText(
-        statusBlock,
         finalResult.stdout ?? streamedStdout,
         finalResult.stderr ?? streamedStderr
       );
@@ -2300,9 +2304,29 @@ export default function App() {
       const isAbort = error?.name === 'AbortError';
       if (isAbort || stopRequestedRef.current) {
         const stopMsg = 'Execution stopped by user';
-        setOutput(`[status]\n${stopMsg}`);
+        setRunSummary(
+          buildRunSummary({
+            status: 'stopped',
+            containerOpenMs: progress.openMs,
+            compileMs: progress.compileMs,
+            executionMs: progress.executionMs,
+            queueWaitMs: progress.queueWaitMs,
+            queuePositionAtEnqueue: progress.queuePositionAtEnqueue
+          })
+        );
+        setOutput(stopMsg);
         appendLog('run stopped by user');
       } else {
+        setRunSummary(
+          buildRunSummary({
+            status: 'failed',
+            containerOpenMs: progress.openMs,
+            compileMs: progress.compileMs,
+            executionMs: progress.executionMs,
+            queueWaitMs: progress.queueWaitMs,
+            queuePositionAtEnqueue: progress.queuePositionAtEnqueue
+          })
+        );
         setOutput(error.message || 'Network error');
         appendLog(`run failed: ${error.message || 'network error'}`);
       }
@@ -2386,18 +2410,7 @@ export default function App() {
     } catch {
       // Ignore logout failures and still clear local state.
     }
-    setUser(null);
-    setRenameFileModalOpen(false);
-    setCreateFileModalOpen(false);
-    setPresetManagerModalOpen(false);
-    setLoginPromptOpen(false);
-    clearPendingSaveTimers();
-    modelsRef.current.forEach((model) => model.dispose());
-    modelsRef.current.clear();
-    if (lspRef.current) {
-      lspRef.current.stop();
-      lspRef.current = null;
-    }
+    window.location.reload();
   };
 
   const openCreateFileModal = () => {
@@ -2953,7 +2966,7 @@ export default function App() {
       return output;
     }
 
-    const sectionPattern = /^\[(status|stdout|stderr|error)\]\n/gm;
+    const sectionPattern = /^\[(stdout|stderr|error)\]\n/gm;
     const matches = Array.from(output.matchAll(sectionPattern));
     if (matches.length === 0) {
       return output;
@@ -3003,6 +3016,15 @@ export default function App() {
     : `Lines ${editorStatus.lineCount}`;
   const saveStatusLabel =
     saveState === 'saving' ? 'saving...' : saveState === 'unsaved' ? 'unsaved' : lastSavedAt ? `${lastSavedAt} saved` : '';
+  const runSummaryItems = [
+    runSummary.queueWaitMs > 0
+      ? `Queue ${typeof runSummary.queuePositionAtEnqueue === 'number' ? `#${runSummary.queuePositionAtEnqueue} ` : ''}${formatSummaryDuration(runSummary.queueWaitMs)}`
+      : null,
+    Number.isFinite(runSummary.containerOpenMs) ? `Open ${formatSummaryDuration(runSummary.containerOpenMs)}` : null,
+    typeof runSummary.compileMs === 'number' ? `Compile ${formatSummaryDuration(runSummary.compileMs)}` : null,
+    typeof runSummary.executionMs === 'number' ? `Run ${formatSummaryDuration(runSummary.executionMs)}` : null,
+    typeof runSummary.sandboxMemoryPeakBytes === 'number' ? `Mem ${formatBytes(runSummary.sandboxMemoryPeakBytes)}` : null
+  ].filter(Boolean);
 
   return (
     <div className="app-shell">
@@ -3176,6 +3198,17 @@ export default function App() {
                         >
                           <img src="/edit.png" alt="Edit folder" className="explorer-action-icon" />
                         </button>
+                        <button
+                          type="button"
+                          className="explorer-file-action"
+                          title="Create file in folder"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openCreateFileModalForFolder(folder.id);
+                          }}
+                        >
+                          <img src="/document.png" alt="Create file in folder" className="explorer-action-icon" />
+                        </button>
                       </div>
                       {!collapsedFolderIds.has(folder.id) ? (
                         <div className="explorer-folder-files">
@@ -3296,7 +3329,7 @@ export default function App() {
           </aside>
         ) : null}
 
-        {explorerOpen ? (
+        {explorerOpen && !isMobileView ? (
           <div
             className="workspace-resizer explorer-resizer"
             role="separator"
@@ -3309,39 +3342,40 @@ export default function App() {
 
         <section className="editor-pane">
           <div className={`editor-surface${!hasFiles ? ' editor-surface-empty' : ''}`}>
-            <Editor
-              height="100%"
-              defaultLanguage="plaintext"
-              defaultValue=""
-              theme="vscode-dark-modern"
-              onMount={onEditorMount}
-              options={{
-                minimap: { enabled: false },
-                'semanticHighlighting.enabled': true,
-                fontSize: 14,
-                fontLigatures: true,
-                smoothScrolling: true,
-                automaticLayout: true,
-                tabSize: 4,
-                insertSpaces: true,
-                lineNumbersMinChars: 3,
-                tabCompletion: 'on',
-                snippetSuggestions: 'inline',
-                acceptSuggestionOnEnter: 'on',
-                readOnly: !activeFile,
-                domReadOnly: !activeFile,
-                suggest: {
-                  showSnippets: true,
-                  snippetsPreventQuickSuggestions: false
-                }
-              }}
-            />
-            {!workspaceReady ? (
+            {workspaceReady ? (
+              <Editor
+                height="100%"
+                defaultLanguage="plaintext"
+                defaultValue=""
+                theme="vscode-dark-modern"
+                onMount={onEditorMount}
+                options={{
+                  minimap: { enabled: false },
+                  'semanticHighlighting.enabled': true,
+                  fontSize: 14,
+                  fontLigatures: true,
+                  smoothScrolling: true,
+                  automaticLayout: true,
+                  tabSize: 4,
+                  insertSpaces: true,
+                  lineNumbersMinChars: 3,
+                  tabCompletion: 'on',
+                  snippetSuggestions: 'inline',
+                  acceptSuggestionOnEnter: 'on',
+                  readOnly: !activeFile,
+                  domReadOnly: !activeFile,
+                  suggest: {
+                    showSnippets: true,
+                    snippetsPreventQuickSuggestions: false
+                  }
+                }}
+              />
+            ) : (
               <div className="editor-empty-state">
                 <div className="editor-empty-state-title">워크스페이스 불러오는 중...</div>
                 <div className="editor-empty-state-body">코드와 LSP를 준비하고 있습니다.</div>
               </div>
-            ) : null}
+            )}
             {workspaceReady && !hasFiles ? (
               <div className="editor-empty-state">
                 <div className="editor-empty-state-title">파일이 없습니다</div>
@@ -3359,16 +3393,14 @@ export default function App() {
           </div>
         </section>
 
-        {explorerOpen ? (
-          <div
-            className="workspace-resizer"
-            role="separator"
-            aria-label="Resize editor and side panels"
-            aria-orientation="vertical"
-            onMouseDown={startWorkspaceResize}
-            onTouchStart={startWorkspaceResize}
-          />
-        ) : null}
+        <div
+          className="workspace-resizer"
+          role="separator"
+          aria-label="Resize editor and side panels"
+          aria-orientation={isMobileView ? 'horizontal' : 'vertical'}
+          onMouseDown={startWorkspaceResize}
+          onTouchStart={startWorkspaceResize}
+        />
 
         <section className="side-pane" ref={sidePaneRef}>
           <div className="panel-slot" style={{ flexGrow: panelRatios[0], flexBasis: 0 }}>
@@ -3402,32 +3434,19 @@ export default function App() {
           <div className="panel-slot" style={{ flexGrow: panelRatios[1], flexBasis: 0 }}>
             <div className="panel">
               <div className="panel-title">Output</div>
-              <pre className="panel-body">{renderOutput()}</pre>
-            </div>
-          </div>
-          <div
-            className="panel-resizer"
-            role="separator"
-            aria-label="Resize output and logs panels"
-            aria-orientation="horizontal"
-            onMouseDown={(event) => startResize(1, event)}
-            onTouchStart={(event) => startResize(1, event)}
-          />
-          <div className="panel-slot" style={{ flexGrow: panelRatios[2], flexBasis: 0 }}>
-            <div className="panel">
-              <div className="panel-title">Logs</div>
-              <div className="panel-body logs-body" ref={logsBodyRef}>
-                {logs.length === 0 ? (
-                  'No logs yet.'
-                ) : (
-                  logs.map((entry, index) => (
-                    <div className="log-line" key={entry.id || `${entry.timestamp}-${index}`}>
-                      <span className="log-time">{entry.timestamp}</span>
-                      <span className="log-text">{entry.text}</span>
-                    </div>
+              <div className="run-summary-bar">
+                <span className={`run-summary-status status-${runSummary.status}`}>{runSummary.status}</span>
+                {runSummaryItems.length > 0
+                  ? (
+                  runSummaryItems.map((item) => (
+                    <span key={item} className="run-summary-pill">
+                      {item}
+                    </span>
                   ))
-                )}
+                  )
+                  : null}
               </div>
+              <pre className="panel-body">{renderOutput()}</pre>
             </div>
           </div>
         </section>

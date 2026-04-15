@@ -1,0 +1,14 @@
+# Scientific and problem-solving stack for terminal-based Python runs.
+numpy
+pandas
+scipy
+sympy
+scikit-learn
+statsmodels
+matplotlib
+seaborn
+networkx
+numba
+pulp
+ortools
+tensorflow

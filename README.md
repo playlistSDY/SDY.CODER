@@ -38,6 +38,12 @@
 
 참고: C 실행 컴파일 플래그는 현재 백엔드에서 `-std=c11`을 사용합니다.
 
+추가로 백엔드 샌드박스 이미지에는 터미널 기반 계산/문제풀이용 패키지가 함께 포함됩니다.
+- Python 과학계산: `numpy`, `pandas`, `scipy`, `sympy`, `scikit-learn`, `statsmodels`, `matplotlib`, `seaborn`, `networkx`, `numba`, `pulp`, `ortools`, `tensorflow`
+- CLI 유틸: `jq`, `bc`, `sqlite3`, `gnuplot`
+- C/C++ 수치 계산용 개발 라이브러리: `OpenBLAS`, `LAPACK`, `Eigen`, `GMP`, `MPFR`
+- Java 기본 클래스패스 포함 라이브러리: `gson`, `commons-lang3`, `commons-math3`, `EJML`
+
 ## 프로젝트 구조
 
 - `frontend`: Vite + React + Monaco
@@ -105,7 +111,7 @@ BACKEND_PORT=3101 PORT=3101 npm run dev
 - `SANDBOX_WORKSPACE_SIZE` (default: `256m`)
 - `SANDBOX_TMP_SIZE` (default: `128m`)
 - `SANDBOX_USER` (default: `65534:65534`)
-- `JAVA_DEFAULT_CLASSPATH` (default: `/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar`)
+- `JAVA_DEFAULT_CLASSPATH` (default: `/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar:/usr/share/java/commons-math3.jar:/usr/share/java/ejml-all.jar`)
 
 ## 로컬(비도커) 사용 시 필요 도구
 

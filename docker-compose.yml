@@ -13,7 +13,7 @@ services:
       SANDBOX_CPU_LIMIT: "1.0"
       SANDBOX_MEMORY_LIMIT: "512m"
       SANDBOX_PIDS_LIMIT: "128"
-      JAVA_DEFAULT_CLASSPATH: "/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar"
+      JAVA_DEFAULT_CLASSPATH: "/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar:/usr/share/java/commons-math3.jar:/usr/share/java/ejml-all.jar"
       DATA_DIR: "/data"
       SQLITE_DB_PATH: "/data/app.db"
       GOOGLE_CLIENT_ID: "121210300536-58p18oet7no98r53d9vch4j4sfh0glea.apps.googleusercontent.com"

@@ -36,7 +36,8 @@ const SANDBOX_WORKSPACE_SIZE = process.env.SANDBOX_WORKSPACE_SIZE || '256m';
 const SANDBOX_TMP_SIZE = process.env.SANDBOX_TMP_SIZE || '128m';
 const SANDBOX_USER = process.env.SANDBOX_USER || '65534:65534';
 const JAVA_DEFAULT_CLASSPATH =
-  process.env.JAVA_DEFAULT_CLASSPATH || '/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar';
+  process.env.JAVA_DEFAULT_CLASSPATH ||
+  '/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar:/usr/share/java/commons-math3.jar:/usr/share/java/ejml-all.jar';
 const COMPILE_ERROR_EXIT_CODE = 42;
 const EXEC_TIME_MARKER = '__WEB_EXEC_NS__=';
 const OPEN_TIME_MARKER = '__WEB_OPEN_NS__=';

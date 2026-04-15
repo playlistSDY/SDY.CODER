@@ -8,27 +8,48 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
+    python3-venv \
     python3-numpy \
     python3-pandas \
     python3-requests \
+    python3-dev \
     gcc \
     g++ \
+    gfortran \
+    make \
+    cmake \
+    pkg-config \
     libssl-dev \
     libcurl4-openssl-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    libeigen3-dev \
+    libgmp-dev \
+    libmpfr-dev \
     nlohmann-json3-dev \
     clangd \
     libgoogle-gson-java \
     libcommons-lang3-java \
+    libcommons-math3-java \
+    libejml-java \
     mono-mcs \
     mono-runtime \
     docker.io \
     curl \
     tar \
     unzip \
+    jq \
+    bc \
+    sqlite3 \
+    gnuplot-nox \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --break-system-packages --no-cache-dir "python-lsp-server[all]"
+COPY backend/python-requirements.txt ./python-requirements.txt
+
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    -r ./python-requirements.txt \
+    "python-lsp-server[all]"
 
 COPY --from=golang_toolchain /usr/local/go /usr/local/go
 
