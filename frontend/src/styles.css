@@ -1204,6 +1204,15 @@ body,
   color: var(--text-main);
 }
 
+.output-inline-plot {
+  display: block;
+  max-width: min(100%, 720px);
+  max-height: 420px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .input-area {
   width: 100%;
   height: calc(100% - 34px);

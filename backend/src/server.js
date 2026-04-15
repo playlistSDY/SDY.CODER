@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
 import { OAuth2Client } from 'google-auth-library';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -45,7 +45,11 @@ const COMPILE_TIME_MARKER = '__WEB_COMPILE_NS__=';
 const SANDBOX_CPU_MARKER = '__WEB_SANDBOX_CPU_MILLI_PCT__=';
 const SANDBOX_MEM_PEAK_MARKER = '__WEB_SANDBOX_MEM_PEAK_BYTES__=';
 const PHASE_MARKER = '__WEB_PHASE__=';
+const ARTIFACT_MARKER = '__WEB_ARTIFACT__=';
+const PLOT_OUTPUT_MARKER = '__WEB_PLOT__=';
 const RUNTIME_INFO_TTL_MS = Number(process.env.RUNTIME_INFO_TTL_MS || 10 * 60 * 1000);
+const MAX_RESULT_ARTIFACTS = 4;
+const MAX_RESULT_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const runtimeInfoCache = new Map();
 let sandboxActiveContainers = 0;
 let sandboxQueueSeq = 0;
@@ -936,6 +940,26 @@ echo "${PHASE_MARKER}compile_end:$((__compile_end_ns - __compile_start_ns))" >&2
 [ $__compile_status -eq 0 ] || exit ${COMPILE_ERROR_EXIT_CODE}; `
     : '';
 
+  const artifactPart =
+    language === 'python'
+      ? `__artifact_count=0; \
+for __artifact in *.png *.jpg *.jpeg *.svg; do \
+  [ -f "$__artifact" ] || continue; \
+  __artifact_count=$((__artifact_count + 1)); \
+  if [ "$__artifact_count" -gt ${MAX_RESULT_ARTIFACTS} ]; then break; fi; \
+  __artifact_size=$(wc -c < "$__artifact" 2>/dev/null || echo 0); \
+  if [ "$__artifact_size" -gt ${MAX_RESULT_ARTIFACT_BYTES} ]; then continue; fi; \
+  case "$__artifact" in \
+    *.png) __artifact_mime='image/png' ;; \
+    *.jpg|*.jpeg) __artifact_mime='image/jpeg' ;; \
+    *.svg) __artifact_mime='image/svg+xml' ;; \
+    *) continue ;; \
+  esac; \
+  __artifact_b64=$(base64 "$__artifact" | tr -d '\\n'); \
+  echo "${ARTIFACT_MARKER}$__artifact|$__artifact_mime|$__artifact_b64" >&2; \
+done; `
+      : '';
+
   return `__boot_ns=$(date +%s%N); \
 printf '%s' "$CODE_B64" | base64 -d > ${spec.sourceFile} \
 && printf '%s' "$STDIN_B64" | base64 -d > .stdin \
@@ -956,6 +980,7 @@ echo "${EXEC_TIME_MARKER}$((__end_ns - __start_ns))" >&2; \
 echo "${PHASE_MARKER}run_end:$((__end_ns - __start_ns))" >&2; \
 echo "${SANDBOX_CPU_MARKER}\${__cpu_milli_pct}" >&2; \
 echo "${SANDBOX_MEM_PEAK_MARKER}\${__mem_peak_bytes}" >&2; \
+${artifactPart}\
 exit $__status`;
 }
 
@@ -965,6 +990,7 @@ function stripExecutionMarker(stdout = '', stderr = '') {
   let compileNs = null;
   let sandboxCpuMilliPct = null;
   let sandboxMemPeakBytes = null;
+  const artifacts = [];
 
   const strip = (text) => {
     const lines = text.split('\n');
@@ -995,6 +1021,20 @@ function stripExecutionMarker(stdout = '', stderr = '') {
         sandboxMemPeakBytes = Number(memMatch[1]);
         continue;
       }
+      if (line.startsWith(ARTIFACT_MARKER)) {
+        const payload = line.slice(ARTIFACT_MARKER.length);
+        const firstSep = payload.indexOf('|');
+        const secondSep = firstSep === -1 ? -1 : payload.indexOf('|', firstSep + 1);
+        if (firstSep !== -1 && secondSep !== -1) {
+          const name = payload.slice(0, firstSep);
+          const mimeType = payload.slice(firstSep + 1, secondSep);
+          const contentBase64 = payload.slice(secondSep + 1);
+          if (name && mimeType && contentBase64) {
+            artifacts.push({ name, mimeType, contentBase64 });
+          }
+        }
+        continue;
+      }
       if (line.startsWith(PHASE_MARKER)) {
         continue;
       }
@@ -1019,7 +1059,8 @@ function stripExecutionMarker(stdout = '', stderr = '') {
     sandboxMemoryPeakBytes:
       sandboxMemPeakBytes === null || Number.isNaN(sandboxMemPeakBytes) ? null : sandboxMemPeakBytes,
     containerOpenMs:
-      openNs === null || Number.isNaN(openNs) ? null : Number((openNs / 1_000_000).toFixed(3))
+      openNs === null || Number.isNaN(openNs) ? null : Number((openNs / 1_000_000).toFixed(3)),
+    artifacts
   };
 }
 
@@ -1039,6 +1080,46 @@ function parsePhaseMarker(line) {
     return { phase, ms };
   }
   return { phase };
+}
+
+async function collectExecutionArtifacts(dirPath, language) {
+  if (language !== 'python') {
+    return [];
+  }
+
+  const mimeByExt = new Map([
+    ['.png', 'image/png'],
+    ['.jpg', 'image/jpeg'],
+    ['.jpeg', 'image/jpeg'],
+    ['.svg', 'image/svg+xml']
+  ]);
+
+  const entries = await readdir(dirPath, { withFileTypes: true });
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .filter((entry) => mimeByExt.has(path.extname(entry.name).toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))
+    .slice(0, MAX_RESULT_ARTIFACTS);
+
+  const artifacts = [];
+  for (const entry of files) {
+    try {
+      const fullPath = path.join(dirPath, entry.name);
+      const buffer = await readFile(fullPath);
+      if (buffer.length > MAX_RESULT_ARTIFACT_BYTES) {
+        continue;
+      }
+      artifacts.push({
+        name: entry.name,
+        mimeType: mimeByExt.get(path.extname(entry.name).toLowerCase()) || 'application/octet-stream',
+        contentBase64: buffer.toString('base64')
+      });
+    } catch {
+      // Ignore unreadable artifact files.
+    }
+  }
+
+  return artifacts;
 }
 
 function canExecute(command) {
@@ -1547,6 +1628,51 @@ function getRuntimeInfoFromCache(language) {
   return cached.value;
 }
 
+function shouldWrapPythonForPlots(code) {
+  const text = String(code || '');
+  return /matplotlib|pyplot|plt\.show\s*\(/i.test(text);
+}
+
+function wrapPythonCodeForPlots(code) {
+  const userCode = String(code || '');
+  if (!shouldWrapPythonForPlots(userCode)) {
+    return userCode;
+  }
+
+  const bootstrap = String.raw`import builtins as __sdy_builtins
+import os as __sdy_os
+
+__sdy_os.environ.setdefault("MPLBACKEND", "Agg")
+__sdy_plot_counter = 0
+
+def __sdy_patch_matplotlib():
+    try:
+        import matplotlib.pyplot as __sdy_plt
+    except Exception:
+        return
+
+    if getattr(__sdy_plt, "__sdy_show_patched__", False):
+        return
+
+    def __sdy_show(*args, **kwargs):
+        global __sdy_plot_counter
+        for __sdy_num in list(__sdy_plt.get_fignums()):
+            __sdy_fig = __sdy_plt.figure(__sdy_num)
+            __sdy_plot_counter += 1
+            __sdy_name = f"__sdy_plot_{__sdy_plot_counter}.png"
+            __sdy_fig.savefig(__sdy_name, bbox_inches="tight")
+            print("${PLOT_OUTPUT_MARKER}" + __sdy_name)
+        return None
+
+    __sdy_plt.show = __sdy_show
+    __sdy_plt.__sdy_show_patched__ = True
+
+__sdy_patch_matplotlib()
+`;
+
+  return `${bootstrap}\n${userCode}`;
+}
+
 function forceRemoveDockerContainer(containerName) {
   try {
     spawnSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
@@ -1561,6 +1687,7 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   if (!spec) {
     throw new Error(`Unsupported language for docker sandbox: ${language}`);
   }
+  const executableCode = language === 'python' ? wrapPythonCodeForPlots(code) : code;
   const shellCommand = buildDockerSandboxCommand(language);
   const logs = [];
   const runtimeInfo = getRuntimeInfoFromCache(language);
@@ -1606,7 +1733,7 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     '-e',
     `JAVA_DEFAULT_CLASSPATH=${JAVA_DEFAULT_CLASSPATH}`,
     '-e',
-    `CODE_B64=${Buffer.from(code, 'utf8').toString('base64')}`,
+    `CODE_B64=${Buffer.from(executableCode, 'utf8').toString('base64')}`,
     '-e',
     `STDIN_B64=${Buffer.from(stdinText, 'utf8').toString('base64')}`,
     '-u',
@@ -1679,7 +1806,8 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
         normalized.startsWith(OPEN_TIME_MARKER) ||
         normalized.startsWith(COMPILE_TIME_MARKER) ||
         normalized.startsWith(SANDBOX_CPU_MARKER) ||
-        normalized.startsWith(SANDBOX_MEM_PEAK_MARKER)
+        normalized.startsWith(SANDBOX_MEM_PEAK_MARKER) ||
+        normalized.startsWith(ARTIFACT_MARKER)
       ) {
         continue;
       }
@@ -1724,7 +1852,8 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
       !normalized.startsWith(OPEN_TIME_MARKER) &&
       !normalized.startsWith(COMPILE_TIME_MARKER) &&
       !normalized.startsWith(SANDBOX_CPU_MARKER) &&
-      !normalized.startsWith(SANDBOX_MEM_PEAK_MARKER)
+      !normalized.startsWith(SANDBOX_MEM_PEAK_MARKER) &&
+      !normalized.startsWith(ARTIFACT_MARKER)
     ) {
       emitStderr(stderrRelayBuffer);
     }
@@ -1765,6 +1894,7 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     sandboxCpuLimit: Number(SANDBOX_CPU_LIMIT),
     sandboxMemoryLimitBytes: parseMemoryLimitToBytes(SANDBOX_MEMORY_LIMIT),
     containerOpenMs: cleaned.containerOpenMs,
+    artifacts: cleaned.artifacts,
     logs,
     compileError: spec.hasCompileStep && result.code === COMPILE_ERROR_EXIT_CODE
   };
@@ -1789,7 +1919,7 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
     emitPhase('open_done', { ms: 0 });
 
     if (language === 'python') {
-      await writeFile(path.join(tempDir, 'main.py'), code, 'utf8');
+      await writeFile(path.join(tempDir, 'main.py'), wrapPythonCodeForPlots(code), 'utf8');
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
@@ -1801,7 +1931,8 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
-      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false };
+      const artifacts = await collectExecutionArtifacts(tempDir, language);
+      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false, artifacts };
     }
 
     if (language === 'c') {
@@ -2607,6 +2738,7 @@ app.post('/api/run', async (req, res) => {
           typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
         containerOpenMs:
           typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
+        artifacts: Array.isArray(result.artifacts) ? result.artifacts : [],
         logs: result.logs || []
       });
       return;
@@ -2628,6 +2760,7 @@ app.post('/api/run', async (req, res) => {
       queuePositionAtEnqueue:
         typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
+      artifacts: Array.isArray(result.artifacts) ? result.artifacts : [],
       logs: result.logs || []
     });
   } catch (error) {
@@ -2721,6 +2854,7 @@ app.post('/api/run/stream', async (req, res) => {
         queuePositionAtEnqueue:
           typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
         containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
+        artifacts: Array.isArray(result.artifacts) ? result.artifacts : [],
         logs: result.logs || []
       });
       res.end();
@@ -2744,6 +2878,7 @@ app.post('/api/run/stream', async (req, res) => {
       queuePositionAtEnqueue:
         typeof result.queuePositionAtEnqueue === 'number' ? result.queuePositionAtEnqueue : null,
       containerOpenMs: typeof result.containerOpenMs === 'number' ? result.containerOpenMs : null,
+      artifacts: Array.isArray(result.artifacts) ? result.artifacts : [],
       logs: result.logs || []
     });
   } catch (error) {

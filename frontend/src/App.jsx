@@ -690,6 +690,25 @@ function buildOutputText(stdout = '', stderr = '', error = '') {
     .join('\n\n');
 }
 
+function normalizeArtifacts(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (item) =>
+      item &&
+      typeof item.name === 'string' &&
+      typeof item.mimeType === 'string' &&
+      typeof item.contentBase64 === 'string' &&
+      item.name &&
+      item.mimeType &&
+      item.contentBase64
+  );
+}
+
+const PLOT_OUTPUT_MARKER = '__WEB_PLOT__=';
+
 function buildRunSummary({
   status = 'idle',
   containerOpenMs = null,
@@ -780,6 +799,7 @@ export default function App() {
   const [language, setLanguage] = useState(() => loadLastLanguage());
   const [stdinText, setStdinText] = useState('');
   const [output, setOutput] = useState('');
+  const [outputArtifacts, setOutputArtifacts] = useState([]);
   const [runSummary, setRunSummary] = useState(() => buildRunSummary());
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
@@ -2230,6 +2250,7 @@ export default function App() {
   const runCode = async () => {
     if (!activeFile) {
       setOutput('No file selected');
+      setOutputArtifacts([]);
       setRunSummary(buildRunSummary({ status: 'idle' }));
       return;
     }
@@ -2303,6 +2324,7 @@ export default function App() {
 
     try {
       setRunning(true);
+      setOutputArtifacts([]);
       setRunSummary(buildRunSummary({ status: 'running' }));
       refreshProgressOutput();
       appendLog(`run requested (${activeFile.language})`);
@@ -2568,6 +2590,7 @@ export default function App() {
           finalResult.error
         );
 
+        setOutputArtifacts(normalizeArtifacts(finalResult.artifacts));
         setOutput(failureOutput || 'Run failed');
         return;
       }
@@ -2589,6 +2612,7 @@ export default function App() {
         finalResult.stderr ?? streamedStderr
       );
 
+      setOutputArtifacts(normalizeArtifacts(finalResult.artifacts));
       setOutput(next || 'No output');
     } catch (error) {
       const isAbort = error?.name === 'AbortError';
@@ -2604,6 +2628,7 @@ export default function App() {
             queuePositionAtEnqueue: progress.queuePositionAtEnqueue
           })
         );
+        setOutputArtifacts([]);
         setOutput(stopMsg);
         appendLog('run stopped by user');
       } else {
@@ -2617,6 +2642,7 @@ export default function App() {
             queuePositionAtEnqueue: progress.queuePositionAtEnqueue
           })
         );
+        setOutputArtifacts([]);
         setOutput(error.message || 'Network error');
         appendLog(`run failed: ${error.message || 'network error'}`);
       }
@@ -3274,21 +3300,65 @@ export default function App() {
       return output;
     }
 
+    const artifactByName = new Map(outputArtifacts.map((artifact) => [artifact.name, artifact]));
+
+    const renderInlinePlots = (text, baseClassName, keyPrefix) => {
+      const lines = String(text || '').split('\n');
+      const nodes = [];
+      let textBuffer = '';
+      let localKey = 0;
+
+      const flushText = () => {
+        if (!textBuffer) {
+          return;
+        }
+        nodes.push(
+          <span key={`${keyPrefix}-text-${localKey++}`} className={baseClassName}>
+            {textBuffer}
+          </span>
+        );
+        textBuffer = '';
+      };
+
+      lines.forEach((line, index) => {
+        if (line.startsWith(PLOT_OUTPUT_MARKER)) {
+          flushText();
+          const artifactName = line.slice(PLOT_OUTPUT_MARKER.length).trim();
+          const artifact = artifactByName.get(artifactName);
+          if (artifact) {
+            nodes.push(
+              <img
+                key={`${keyPrefix}-plot-${localKey++}`}
+                className="output-inline-plot"
+                src={`data:${artifact.mimeType};base64,${artifact.contentBase64}`}
+                alt=""
+              />
+            );
+          }
+          return;
+        }
+
+        textBuffer += line;
+        if (index < lines.length - 1) {
+          textBuffer += '\n';
+        }
+      });
+
+      flushText();
+      return nodes;
+    };
+
     const sectionPattern = /^\[(stdout|stderr|error)\]\n/gm;
     const matches = Array.from(output.matchAll(sectionPattern));
     if (matches.length === 0) {
-      return output;
+      return renderInlinePlots(output, 'output-plain-block', 'plain-root');
     }
 
     const chunks = [];
     let key = 0;
 
     if (matches[0].index > 0) {
-      chunks.push(
-        <span key={`plain-${key++}`} className="output-plain-block">
-          {output.slice(0, matches[0].index)}
-        </span>
-      );
+      chunks.push(...renderInlinePlots(output.slice(0, matches[0].index), 'output-plain-block', `plain-${key++}`));
     }
 
     for (let i = 0; i < matches.length; i += 1) {
@@ -3307,11 +3377,7 @@ export default function App() {
               ? 'output-stdout-block'
               : 'output-plain-block';
 
-      chunks.push(
-        <span key={`section-${key++}`} className={className}>
-          {raw}
-        </span>
-      );
+      chunks.push(...renderInlinePlots(raw, className, `section-${key++}`));
     }
 
     return chunks;
@@ -3751,7 +3817,7 @@ export default function App() {
                   )
                   : null}
               </div>
-              <pre className="panel-body">{renderOutput()}</pre>
+              <div className="panel-body">{renderOutput()}</div>
             </div>
           </div>
         </section>
