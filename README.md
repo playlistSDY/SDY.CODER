@@ -1,70 +1,185 @@
 # SDY.CODER
 
-브라우저에서 VS Code 느낌으로 코드를 작성하고 실행할 수 있는 웹 컴파일러입니다.  
-현재 `Python / C / C++ / Java / C# / Node.js / Go / Kotlin / Dart`를 지원합니다.
+브라우저에서 바로 코드를 작성하고 실행할 수 있는 온라인 코딩 워크스페이스입니다.  
+VS Code에 익숙한 흐름을 최대한 유지하면서도, 문제풀이와 실습에 바로 쓸 수 있게 가볍고 빠른 사용감을 목표로 만들었습니다.
 
-## 주요 기능
+현재 지원 언어:
 
-- Monaco Editor 기반 에디터 + VS Code Dark Modern 스타일 테마
-- 미니맵 비활성화
-- 언어별 LSP(WebSocket 브리지)
-  - Diagnostics, Hover, Completion, Semantic Highlighting
-- `Input / Output / Logs` 3패널 UI
-  - 패널 간 드래그 리사이즈 지원
-  - 모바일 레이아웃 최적화
-- 실행 로그 단순화
-  - `HH:MM` 타임스탬프
-  - LSP 연결/해제, 실행 단계 위주 표시
-- 실행 결과 `Output`는 `[status]` 중심 포맷
-  - `Opening container: ... ms`
-  - `Code execution time: ... ms`
-- LocalStorage 저장
-  - 마지막 선택 언어
-  - 언어별 마지막 코드
-  - 패널 크기
-- 파비콘/상단 로고: `frontend/public/sc_logo.png`
+- Python
+- C
+- C++
+- Java
+- C#
+- Node.js
+- Go
+- Kotlin
+- Dart
 
-## 지원 언어/버전 표기(프론트 표시 기준)
+## 어떤 점이 편한가요?
 
-- Python `3.11`
-- C `99`
-- C++ `17`
-- Java `21`
-- C# `Mono`
-- Node.js `22`
-- Go `1.x`
-- Kotlin `1.9+`
-- Dart `3.x`
+### 1. 브라우저 안에서 바로 코딩하고 실행
 
-참고: C 실행 컴파일 플래그는 현재 백엔드에서 `-std=c11`을 사용합니다.
+- 별도 설치 없이 바로 코드를 작성하고 실행할 수 있습니다.
+- `Input`을 넣고 결과를 바로 확인할 수 있습니다.
+- 실행 상태는 `idle / running / compile / open / run / mem` 같은 요약 바로 한눈에 확인할 수 있습니다.
+- 모바일, 태블릿, 데스크탑 화면에 맞춰 레이아웃이 반응형으로 바뀝니다.
 
-추가로 백엔드 샌드박스 이미지에는 터미널 기반 계산/문제풀이용 패키지가 함께 포함됩니다.
-- Python 과학계산: `numpy`, `pandas`, `scipy`, `sympy`, `scikit-learn`, `statsmodels`, `matplotlib`, `seaborn`, `networkx`, `numba`, `pulp`, `ortools`, `tensorflow`
-- CLI 유틸: `jq`, `bc`, `sqlite3`, `gnuplot`
-- C/C++ 수치 계산용 개발 라이브러리: `OpenBLAS`, `LAPACK`, `Eigen`, `GMP`, `MPFR`
-- Java 기본 클래스패스 포함 라이브러리: `gson`, `commons-lang3`, `commons-math3`, `EJML`
+### 2. VS Code 느낌의 에디터 경험
 
-## 프로젝트 구조
+- Monaco Editor 기반 에디터를 사용합니다.
+- 단축키로 실행할 수 있습니다.
+- 자동완성, hover, 진단, semantic highlighting 등 LSP 기능을 지원합니다.
+- 언어별로 가능한 한 자연스럽게 동작하도록 러너와 에디터를 조정해 두었습니다.
+  - Java는 public class 이름에 맞춰 실행
+  - Kotlin은 top-level `main`과 class-based `main` 모두 안정적으로 실행
 
-- `frontend`: Vite + React + Monaco
-- `backend`: Express + WebSocket LSP bridge + `/api/run`
-- `docker-compose.yml`: Nginx(프론트) + Backend 구성
+### 3. 직접 만드는 프리셋
 
-## 빠른 실행
+- 상단 `Presets`에서 사용자 프리셋을 직접 만들 수 있습니다.
+- 언어별로 `prefix`를 저장해두고 자동완성처럼 펼칠 수 있습니다.
+- Java처럼 파일 이름이 중요한 언어를 위해 아래 변수도 지원합니다.
+  - `$classname`
+  - `$filename`
+  - `$filename_base`
+- 프리셋 본문도 Monaco 에디터로 작성할 수 있습니다.
 
-### 1) Docker Compose (권장)
+예를 들어 Java에서 `pvsm` 같은 프리셋을 만들고, 본문에 `$classname`을 넣어두면 현재 파일 이름에 맞는 클래스 틀이 자동으로 들어갑니다.
+
+### 4. 에디터 설정 저장
+
+- `Settings` 모달에서 에디터 환경을 직접 바꿀 수 있습니다.
+- 현재 지원 옵션:
+  - 테마
+  - 폰트
+  - 글자 크기
+  - 줄 간격
+  - 탭 크기
+  - 줄바꿈
+  - 줄번호
+  - 미니맵
+  - font ligatures
+  - semantic highlighting
+
+설정은 로그인 여부에 따라 저장 위치가 나뉩니다.
+
+- 로그인 상태: 계정 기준으로 저장
+- 비로그인 상태: 세션 기준으로 저장
+
+### 5. 로그인/비로그인 흐름 분리
+
+- 로그인하면 파일, 프리셋, 에디터 설정을 계정 기준으로 유지할 수 있습니다.
+- 비로그인 상태에서도 세션 단위로 작업 내용을 유지합니다.
+- 로그인 상태와 비로그인 상태는 서로 섞이지 않게 분리되어 있습니다.
+- 마지막으로 열던 파일도 기억해서, 다시 들어오면 이어서 작업할 수 있습니다.
+
+### 6. 탐색기 기반 파일 관리
+
+- 폴더와 파일을 만들고 수정할 수 있습니다.
+- 폴더 단위로 파일을 정리할 수 있습니다.
+- 폴더 행에서 바로 새 파일을 만들 수 있습니다.
+- 탐색기 크기를 줄여도 파일명/폴더명은 줄바꿈 대신 `...` 처리됩니다.
+
+## 출력과 실행 결과
+
+실행 결과는 단순 텍스트뿐 아니라 시각 자료도 함께 다룰 수 있습니다.
+
+### 텍스트 출력
+
+- `stdout`, `stderr`, 실행 시간, 메모리 등의 결과를 바로 확인할 수 있습니다.
+- 실행 요약은 본문과 분리되어 보여서 출력이 더 깔끔합니다.
+
+### matplotlib 그래프 출력
+
+- Python에서 `matplotlib`를 사용할 수 있습니다.
+- `plt.show()` 결과를 브라우저 안에 바로 표시합니다.
+- 그래프는 별도 섹션이 아니라 출력 흐름 안에 자연스럽게 삽입됩니다.
+- `print(...)`와 그래프가 코랩처럼 순서대로 이어서 보입니다.
+
+예시:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+x = np.linspace(0, 2 * np.pi, 400)
+y = np.sin(x)
+
+plt.plot(x, y)
+plt.title("Sine Wave")
+plt.show()
+```
+
+## Python 패키지 지원
+
+문제풀이뿐 아니라 데이터 분석, 통계, 최적화, 시각화 실습에도 쓸 수 있도록 주요 패키지를 포함하고 있습니다.
+
+포함된 대표 패키지:
+
+- `numpy`
+- `pandas`
+- `scipy`
+- `sympy`
+- `scikit-learn`
+- `statsmodels`
+- `matplotlib`
+- `seaborn`
+- `networkx`
+- `numba`
+- `pulp`
+- `ortools`
+- `tensorflow`
+- `requests`
+
+또한 타입 힌트와 자동완성 품질을 높이기 위해 가능한 패키지에는 stub 패키지도 함께 반영했습니다.
+
+예:
+
+- `pandas-stubs`
+- `scipy-stubs`
+- `matplotlib-stubs`
+- `scikit-learn-stubs`
+- `types-seaborn`
+- `types-networkx`
+- `types-requests`
+- `types-protobuf`
+
+## 테마
+
+에디터 테마에 맞춰 앱 전체 분위기도 함께 바뀝니다.
+
+- `Dark Modern`
+- `Dark`
+- `Light`
+- `High Contrast`
+
+라이트 테마에서는 전체 UI가 밝은 배경 기준으로 바뀌고, 하이 컨트라스트에서는 더 강한 대비의 검은 배경 UI로 전환됩니다.
+
+## 이런 용도에 잘 맞습니다
+
+- 알고리즘 문제풀이
+- 수업 실습
+- 빠른 문법 테스트
+- Python 데이터 분석/통계 예제 실행
+- Java, Kotlin, C# 등 여러 언어의 간단한 런타임 확인
+- 모바일이나 태블릿에서 가볍게 코드 확인
+
+## 실행 환경 요약
+
+- Frontend: React + Vite + Monaco Editor
+- Backend: Express + WebSocket LSP bridge + 실행 API
+- Sandbox: Docker 기반 격리 실행
+
+## 빠르게 실행하기
+
+권장 방식:
 
 ```bash
 docker compose up --build
 ```
 
-- 접속: `http://localhost:5403`
-- 구성:
-  - `frontend`(Nginx): 정적 `dist` 서빙
-  - `backend`: LSP + 실행 API
-  - Nginx reverse proxy
-    - `/api/*` -> `backend:3001`
-    - `/lsp/*` -> `backend:3001` (WebSocket)
+접속:
+
+- `http://localhost:5403`
 
 중지:
 
@@ -72,62 +187,8 @@ docker compose up --build
 docker compose down
 ```
 
-### 2) 로컬 개발 실행
+## 참고
 
-```bash
-npm install
-npm run dev
-```
-
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:3001`
-
-포트 변경 예시:
-
-```bash
-BACKEND_PORT=3101 PORT=3101 npm run dev
-```
-
-## 샌드박스/보안 모델
-
-- `/api/run`은 Docker sandbox 컨테이너에서 실행됩니다.
-- 기본 제한:
-  - `--network none`
-  - CPU/메모리/PID 제한
-  - 비루트 사용자(`65534:65534`)
-- Backend 컨테이너는 샌드박스 생성을 위해 Docker socket(`/var/run/docker.sock`)을 사용합니다.
-
-주의: Docker socket 접근은 강한 권한입니다. 외부 공개 시 인증/네트워크 제어를 반드시 추가하세요.
-
-## 환경변수 (backend)
-
-- `PORT` (default: `3001`)
-- `RUN_TIMEOUT_MS` (default: `8000`)
-- `SANDBOX_PROVIDER` (default: `docker`)
-- `SANDBOX_IMAGE` (default: `web-vscode-backend:latest`)
-- `SANDBOX_CPU_LIMIT` (default: `1.0`)
-- `SANDBOX_MEMORY_LIMIT` (default: `512m`)
-- `SANDBOX_PIDS_LIMIT` (default: `128`)
-- `SANDBOX_WORKSPACE_SIZE` (default: `256m`)
-- `SANDBOX_TMP_SIZE` (default: `128m`)
-- `SANDBOX_USER` (default: `65534:65534`)
-- `JAVA_DEFAULT_CLASSPATH` (default: `/usr/share/java/gson.jar:/usr/share/java/commons-lang3.jar:/usr/share/java/commons-math3.jar:/usr/share/java/ejml-all.jar`)
-
-## 로컬(비도커) 사용 시 필요 도구
-
-### 실행/컴파일
-
-- `python3`, `gcc`, `g++`, `javac`, `java`, `mcs`, `mono`, `node`, `go`, `kotlinc`, `dart`
-
-### LSP 후보
-
-- Python: `pyright-langserver` / `basedpyright-langserver` / `pylsp`
-- C/C++: `clangd`
-- Java: `jdtls`
-- C#: `csharp-ls` / `omnisharp`
-- Node.js: `typescript-language-server`
-- Go: `gopls`
-- Kotlin: `kotlin-lsp`
-- Dart: `dart language-server`
-
-백엔드는 각 언어 연결 시 설치된 후보를 자동 탐색해서 사용합니다.
+- Python, C, C++, Java, C#, Node.js, Go, Kotlin, Dart 실행을 지원합니다.
+- LSP는 환경에 설치된 후보를 자동 탐색해 연결합니다.
+- 일부 언어 기능은 런타임과 LSP 설치 상태에 따라 차이가 있을 수 있습니다.
