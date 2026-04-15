@@ -294,6 +294,20 @@ function buildJavaStarter(fileName = 'Main.java') {
   return `public class ${className} {\n    public static void main(String[] args) {\n        System.out.println("Hello, Java");\n    }\n}\n`;
 }
 
+function getJavaRunSpecFromCode(code) {
+  const text = String(code || '');
+  const publicTypeMatch = text.match(/\bpublic\s+(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/);
+  const mainTypeMatch = text.match(/\b(?:class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/);
+  const typeName = publicTypeMatch?.[1] || mainTypeMatch?.[1] || 'Main';
+  const sourceFile = `${typeName}.java`;
+  return {
+    typeName,
+    sourceFile,
+    compileCommand: `javac -proc:none -cp "$JAVA_DEFAULT_CLASSPATH" ${sourceFile}`,
+    runCommand: `java -cp ".:$JAVA_DEFAULT_CLASSPATH" ${typeName}`
+  };
+}
+
 function getCsharpPrimaryTypeName(fileName = 'Main.cs') {
   const base = String(fileName || '')
     .replace(/\.[^.]+$/, '')
@@ -673,8 +687,8 @@ const DOCKER_RUN_SPEC = {
   },
   kotlin: {
     sourceFile: 'Main.kt',
-    compileCommand: 'kotlinc Main.kt -d main.jar && [ -f main.jar ]',
-    runCommand: 'java -cp "main.jar:/opt/kotlinc/lib/*" MainKt',
+    compileCommand: 'kotlinc Main.kt -include-runtime -d main.jar && [ -f main.jar ]',
+    runCommand: 'java -jar main.jar',
     hasCompileStep: true
   },
   dart: {
@@ -923,8 +937,8 @@ function listPythonModuleSymbols(moduleName) {
   return result;
 }
 
-function buildDockerSandboxCommand(language) {
-  const spec = DOCKER_RUN_SPEC[language];
+function buildDockerSandboxCommand(language, overrideSpec = null) {
+  const spec = overrideSpec || DOCKER_RUN_SPEC[language];
   if (!spec) {
     throw new Error(`Unsupported language for docker sandbox: ${language}`);
   }
@@ -1683,12 +1697,12 @@ function forceRemoveDockerContainer(containerName) {
 
 async function runInDockerSandbox(language, code, stdinText = '', options = {}) {
   const { onPhase = null, onStdout = null, onStderr = null, runControl = null } = options;
-  const spec = DOCKER_RUN_SPEC[language];
+  const spec = language === 'java' ? { ...DOCKER_RUN_SPEC.java, ...getJavaRunSpecFromCode(code) } : DOCKER_RUN_SPEC[language];
   if (!spec) {
     throw new Error(`Unsupported language for docker sandbox: ${language}`);
   }
   const executableCode = language === 'python' ? wrapPythonCodeForPlots(code) : code;
-  const shellCommand = buildDockerSandboxCommand(language);
+  const shellCommand = buildDockerSandboxCommand(language, spec);
   const logs = [];
   const runtimeInfo = getRuntimeInfoFromCache(language);
   void getRuntimeInfo(language);
@@ -2014,11 +2028,12 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
     }
 
     if (language === 'java') {
-      await writeFile(path.join(tempDir, 'Main.java'), code, 'utf8');
+      const javaSpec = getJavaRunSpecFromCode(code);
+      await writeFile(path.join(tempDir, javaSpec.sourceFile), code, 'utf8');
       logs.push('  compiling source code');
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
-      const compile = await runCommand('javac', ['-cp', JAVA_DEFAULT_CLASSPATH, 'Main.java'], {
+      const compile = await runCommand('javac', ['-proc:none', '-cp', JAVA_DEFAULT_CLASSPATH, javaSpec.sourceFile], {
         cwd: tempDir,
         runControl
       });
@@ -2030,7 +2045,7 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand('java', ['-cp', `.:${JAVA_DEFAULT_CLASSPATH}`, 'Main'], {
+      const run = await runCommand('java', ['-cp', `.:${JAVA_DEFAULT_CLASSPATH}`, javaSpec.typeName], {
         cwd: tempDir,
         input: stdinText,
         runControl
@@ -2158,7 +2173,7 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  compiling source code');
       emitPhase('compile_start');
       const compileStartedAt = process.hrtime.bigint();
-      const compile = await runCommand('kotlinc', ['Main.kt', '-d', 'main.jar'], {
+      const compile = await runCommand('kotlinc', ['Main.kt', '-include-runtime', '-d', 'main.jar'], {
         cwd: tempDir,
         runControl
       });
@@ -2170,7 +2185,7 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
       logs.push('  running code');
       emitPhase('run_start');
       const startedAt = process.hrtime.bigint();
-      const run = await runCommand('java', ['-cp', 'main.jar:/opt/kotlinc/lib/*', 'MainKt'], {
+      const run = await runCommand('java', ['-jar', 'main.jar'], {
         cwd: tempDir,
         input: stdinText,
         runControl

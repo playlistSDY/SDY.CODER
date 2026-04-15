@@ -180,6 +180,27 @@ function resolveSnippetVariables(insertText, language, fileName) {
     .replace(/\$filename\b/gi, resolvedFileName);
 }
 
+function shouldSuppressDiagnostic(model, diagnostic) {
+  const source = String(diagnostic?.source || '').toLowerCase();
+  const message = String(diagnostic?.message || '');
+
+  if (!source.includes('pyright')) {
+    return false;
+  }
+
+  if (!/Result of call expression is of type .+ and is not used/i.test(message)) {
+    return false;
+  }
+
+  const lineNumber = (diagnostic?.range?.start?.line ?? 0) + 1;
+  if (lineNumber < 1 || typeof model?.getLineContent !== 'function') {
+    return false;
+  }
+
+  const line = model.getLineContent(lineNumber);
+  return /\bplt\.[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(line);
+}
+
 const COMPLETION_KIND_MAP = {
   1: 'Text',
   2: 'Method',
@@ -1191,7 +1212,9 @@ export class LSPClient {
       4: this.monaco.MarkerSeverity.Hint
     };
 
-    const markers = diagnostics.map((d) => {
+    const markers = diagnostics
+      .filter((d) => !shouldSuppressDiagnostic(this.model, d))
+      .map((d) => {
       const startLineNumber = (d.range?.start?.line ?? 0) + 1;
       const startColumn = (d.range?.start?.character ?? 0) + 1;
       const endLineNumber = (d.range?.end?.line ?? 0) + 1;
@@ -1206,7 +1229,7 @@ export class LSPClient {
         message: d.message || 'Unknown diagnostic',
         source: d.source || 'lsp'
       };
-    });
+      });
 
     this.monaco.editor.setModelMarkers(this.model, 'lsp', markers);
   }
