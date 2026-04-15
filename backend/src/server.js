@@ -96,9 +96,30 @@ CREATE TABLE IF NOT EXISTS files (
   FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id TEXT PRIMARY KEY,
+  editor_settings TEXT NOT NULL,
+  selected_file_id TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_custom_snippets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  language TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_files_user_id_updated_at ON files(user_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_folders_user_id_name ON folders(user_id, name);
+CREATE INDEX IF NOT EXISTS idx_user_custom_snippets_user_id_language ON user_custom_snippets(user_id, language);
 `);
 const fileColumns = db.prepare('PRAGMA table_info(files)').all();
 if (!fileColumns.some((column) => column.name === 'stdin')) {
@@ -108,6 +129,10 @@ if (!fileColumns.some((column) => column.name === 'folder_id')) {
   db.exec(`ALTER TABLE files ADD COLUMN folder_id TEXT`);
 }
 db.exec(`CREATE INDEX IF NOT EXISTS idx_files_user_id_folder_id ON files(user_id, folder_id)`);
+const preferenceColumns = db.prepare('PRAGMA table_info(user_preferences)').all();
+if (!preferenceColumns.some((column) => column.name === 'selected_file_id')) {
+  db.exec(`ALTER TABLE user_preferences ADD COLUMN selected_file_id TEXT`);
+}
 
 const oauthClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
@@ -310,6 +335,91 @@ function serializeUser(user) {
     email: user.email,
     name: user.name,
     avatarUrl: user.avatarUrl || user.avatar_url || null
+  };
+}
+
+function normalizeEditorSettings(value) {
+  const next = value && typeof value === 'object' ? value : {};
+  return {
+    theme: typeof next.theme === 'string' ? next.theme : 'vscode-dark-modern',
+    fontFamily:
+      typeof next.fontFamily === 'string' ? next.fontFamily : "'Consolas', 'Monaco', 'Menlo', monospace",
+    fontSize:
+      typeof next.fontSize === 'number' && Number.isFinite(next.fontSize)
+        ? Math.max(11, Math.min(24, next.fontSize))
+        : 14,
+    lineHeight:
+      typeof next.lineHeight === 'number' && Number.isFinite(next.lineHeight)
+        ? Math.max(16, Math.min(40, next.lineHeight))
+        : 22,
+    minimap: typeof next.minimap === 'boolean' ? next.minimap : false,
+    semanticHighlighting: typeof next.semanticHighlighting === 'boolean' ? next.semanticHighlighting : true,
+    fontLigatures: typeof next.fontLigatures === 'boolean' ? next.fontLigatures : true,
+    wordWrap:
+      next.wordWrap === 'on' || next.wordWrap === 'off' || next.wordWrap === 'bounded' ? next.wordWrap : 'off',
+    lineNumbers:
+      next.lineNumbers === 'on' || next.lineNumbers === 'off' || next.lineNumbers === 'relative'
+        ? next.lineNumbers
+        : 'on',
+    tabSize:
+      typeof next.tabSize === 'number' && Number.isFinite(next.tabSize)
+        ? Math.max(2, Math.min(8, next.tabSize))
+        : 4
+  };
+}
+
+function normalizeCustomSnippetPrefix(prefix) {
+  return String(prefix || '').trim();
+}
+
+function normalizeCustomSnippets(snippets) {
+  if (!Array.isArray(snippets)) {
+    return [];
+  }
+  return snippets
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.id === 'string' &&
+        SUPPORTED_LANGUAGES.includes(entry.language) &&
+        typeof entry.prefix === 'string' &&
+        typeof entry.body === 'string'
+    )
+    .map((entry) => ({
+      id: entry.id,
+      language: entry.language,
+      prefix: normalizeCustomSnippetPrefix(entry.prefix),
+      description: typeof entry.description === 'string' ? entry.description.trim() : '',
+      body: entry.body
+    }))
+    .filter((entry) => entry.id && entry.prefix && entry.body);
+}
+
+function getUserPreferences(userId) {
+  const settingsRow = db
+    .prepare('SELECT editor_settings AS editorSettings, selected_file_id AS selectedFileId FROM user_preferences WHERE user_id = ?')
+    .get(userId);
+  const snippets = db
+    .prepare(
+      `SELECT id, language, prefix, description, body
+       FROM user_custom_snippets
+       WHERE user_id = ?
+       ORDER BY LOWER(language) ASC, LOWER(prefix) ASC, created_at ASC`
+    )
+    .all(userId);
+  let parsedEditorSettings = null;
+  if (settingsRow?.editorSettings) {
+    try {
+      parsedEditorSettings = JSON.parse(settingsRow.editorSettings);
+    } catch {
+      parsedEditorSettings = null;
+    }
+  }
+
+  return {
+    editorSettings: normalizeEditorSettings(parsedEditorSettings),
+    customSnippets: normalizeCustomSnippets(snippets),
+    selectedFileId: typeof settingsRow?.selectedFileId === 'string' && settingsRow.selectedFileId ? settingsRow.selectedFileId : null
   };
 }
 
@@ -2108,6 +2218,88 @@ app.post('/api/auth/logout', (req, res) => {
   }
   clearSessionCookie(res);
   res.json({ ok: true });
+});
+
+app.get('/api/preferences', requireAuth, (req, res) => {
+  try {
+    res.json(getUserPreferences(req.user.id));
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'failed to load preferences' });
+  }
+});
+
+app.patch('/api/preferences', requireAuth, (req, res) => {
+  const hasEditorSettings = Object.prototype.hasOwnProperty.call(req.body || {}, 'editorSettings');
+  const hasCustomSnippets = Object.prototype.hasOwnProperty.call(req.body || {}, 'customSnippets');
+  const hasSelectedFileId = Object.prototype.hasOwnProperty.call(req.body || {}, 'selectedFileId');
+  if (!hasEditorSettings && !hasCustomSnippets && !hasSelectedFileId) {
+    res.status(400).json({ error: 'no preference payload provided' });
+    return;
+  }
+
+  const now = nowIso();
+
+  try {
+    if (hasEditorSettings) {
+      const editorSettings = normalizeEditorSettings(req.body.editorSettings);
+      db.prepare(
+        `INSERT INTO user_preferences (user_id, editor_settings, selected_file_id, updated_at)
+         VALUES (?, ?, NULL, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           editor_settings = excluded.editor_settings,
+           updated_at = excluded.updated_at`
+      ).run(req.user.id, JSON.stringify(editorSettings), now);
+    }
+
+    if (hasSelectedFileId) {
+      const selectedFileId =
+        req.body.selectedFileId === null || req.body.selectedFileId === undefined || req.body.selectedFileId === ''
+          ? null
+          : String(req.body.selectedFileId).trim();
+      if (selectedFileId) {
+        const exists = db.prepare('SELECT id FROM files WHERE id = ? AND user_id = ?').get(selectedFileId, req.user.id);
+        if (!exists) {
+          res.status(400).json({ error: 'selected file not found' });
+          return;
+        }
+      }
+      db.prepare(
+        `INSERT INTO user_preferences (user_id, editor_settings, selected_file_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           selected_file_id = excluded.selected_file_id,
+           updated_at = excluded.updated_at`
+      ).run(req.user.id, JSON.stringify(getUserPreferences(req.user.id).editorSettings), selectedFileId, now);
+    }
+
+    if (hasCustomSnippets) {
+      const customSnippets = normalizeCustomSnippets(req.body.customSnippets);
+      const replaceSnippets = db.transaction((userId, snippets, timestamp) => {
+        db.prepare('DELETE FROM user_custom_snippets WHERE user_id = ?').run(userId);
+        const insertSnippet = db.prepare(
+          `INSERT INTO user_custom_snippets (id, user_id, language, prefix, description, body, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        snippets.forEach((snippet) => {
+          insertSnippet.run(
+            snippet.id,
+            userId,
+            snippet.language,
+            snippet.prefix,
+            snippet.description,
+            snippet.body,
+            timestamp,
+            timestamp
+          );
+        });
+      });
+      replaceSnippets(req.user.id, customSnippets, now);
+    }
+
+    res.json(getUserPreferences(req.user.id));
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'failed to save preferences' });
+  }
 });
 
 app.get('/api/files', requireAuth, (req, res) => {

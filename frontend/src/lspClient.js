@@ -265,6 +265,8 @@ const TRANSPORT_NOISE_PATTERNS = [
   /^\[\/.*\]$/
 ];
 
+const SEMANTIC_TOKENS_DEBOUNCE_MS = 60;
+
 function isLowSignalRawLogLine(rawLine) {
   const line = String(rawLine || '').trim();
   if (!line) {
@@ -695,6 +697,12 @@ export class LSPClient {
     this.lastLogLine = '';
     this.lastLogAt = 0;
     this.semanticTokensEmitter = new this.monaco.Emitter();
+    this.lastSemanticTokens = { data: new Uint32Array(), resultId: null };
+    this.semanticTokensRequestSeq = 0;
+    this.semanticTokensFetchPromise = null;
+    this.semanticTokensRefreshTimer = null;
+    this.semanticTokensDirty = true;
+    this.semanticTokensResolvedVersion = 0;
 
     const resolvedFileName = fileName || FILE_NAME_BY_LANG[language] || `main.${EXT_BY_LANG[language]}`;
     this.fileName = resolvedFileName;
@@ -781,6 +789,7 @@ export class LSPClient {
           this.registerProviders(initializeResult?.capabilities || {});
           this.providersRegistered = true;
         }
+        this.scheduleSemanticTokensRefresh(0);
       } catch (error) {
         this.log(`${this.language} lsp initialize failed`);
         this.handleDisconnect();
@@ -816,6 +825,8 @@ export class LSPClient {
         return;
       }
       this.docVersion += 1;
+      this.markSemanticTokensDirty();
+      this.scheduleSemanticTokensRefresh();
       this.sendNotification('textDocument/didChange', {
         textDocument: {
           uri: this.uri,
@@ -862,6 +873,11 @@ export class LSPClient {
     this.fileName = resolvedFileName;
     this.uri = nextUri;
     this.docVersion = 1;
+    this.lastSemanticTokens = { data: new Uint32Array(), resultId: null };
+    this.semanticTokensFetchPromise = null;
+    this.semanticTokensDirty = true;
+    this.semanticTokensResolvedVersion = 0;
+    this.clearSemanticTokensRefreshTimer();
     if (!sameModel) {
       this.bindModelChangeListener();
     }
@@ -875,7 +891,7 @@ export class LSPClient {
           text: this.model.getValue()
         }
       });
-      this.semanticTokensEmitter.fire();
+      this.scheduleSemanticTokensRefresh(0);
     }
   }
 
@@ -940,14 +956,90 @@ export class LSPClient {
     }
   }
 
+  clearSemanticTokensRefreshTimer() {
+    if (this.semanticTokensRefreshTimer !== null) {
+      window.clearTimeout(this.semanticTokensRefreshTimer);
+      this.semanticTokensRefreshTimer = null;
+    }
+  }
+
+  markSemanticTokensDirty() {
+    this.semanticTokensDirty = true;
+  }
+
+  scheduleSemanticTokensRefresh(delay = SEMANTIC_TOKENS_DEBOUNCE_MS) {
+    this.clearSemanticTokensRefreshTimer();
+    this.semanticTokensRefreshTimer = window.setTimeout(() => {
+      this.semanticTokensRefreshTimer = null;
+      this.refreshSemanticTokens();
+    }, Math.max(0, delay));
+  }
+
+  async refreshSemanticTokens() {
+    if (!this.isReady || !this.model || this.semanticTokensFetchPromise) {
+      return this.semanticTokensFetchPromise || null;
+    }
+
+    const targetVersion = this.docVersion;
+    const targetModel = this.model;
+    const targetUri = this.uri;
+    const requestSeq = ++this.semanticTokensRequestSeq;
+
+    const fetchPromise = this.sendRequest('textDocument/semanticTokens/full', {
+      textDocument: { uri: targetUri }
+    })
+      .then((tokens) => {
+        if (
+          !this.isReady ||
+          targetModel !== this.model ||
+          targetUri !== this.uri ||
+          requestSeq !== this.semanticTokensRequestSeq
+        ) {
+          return;
+        }
+
+        if (targetVersion !== this.docVersion) {
+          this.markSemanticTokensDirty();
+          this.scheduleSemanticTokensRefresh();
+          return;
+        }
+
+        const data = Array.isArray(tokens?.data) ? tokens.data : [];
+        this.lastSemanticTokens = {
+          resultId: tokens?.resultId,
+          data: new Uint32Array(data)
+        };
+        this.semanticTokensDirty = false;
+        this.semanticTokensResolvedVersion = targetVersion;
+        this.semanticTokensEmitter.fire();
+      })
+      .catch(() => {
+        // Keep the last successful semantic colors on screen.
+      })
+      .finally(() => {
+        if (this.semanticTokensFetchPromise === fetchPromise) {
+          this.semanticTokensFetchPromise = null;
+        }
+
+        if (this.isReady && this.semanticTokensDirty && this.semanticTokensResolvedVersion !== this.docVersion) {
+          this.scheduleSemanticTokensRefresh();
+        }
+      });
+
+    this.semanticTokensFetchPromise = fetchPromise;
+    return fetchPromise;
+  }
+
   dispose() {
     this.pending.forEach(({ reject }) => reject(new Error('LSP disconnected')));
     this.pending.clear();
     this.clearReconnectTimer();
+    this.clearSemanticTokensRefreshTimer();
     this.monaco.editor.setModelMarkers(this.model, 'lsp', []);
     this.disposables.forEach((d) => d.dispose());
     this.disposables = [];
     this.isReady = false;
+    this.semanticTokensFetchPromise = null;
   }
 
   log(message) {
@@ -1044,7 +1136,8 @@ export class LSPClient {
     }
 
     if (msg.method === 'workspace/semanticTokens/refresh') {
-      this.semanticTokensEmitter.fire();
+      this.markSemanticTokensDirty();
+      this.scheduleSemanticTokensRefresh(0);
       return;
     }
 
@@ -1284,23 +1377,15 @@ export class LSPClient {
             tokenModifiers
           }),
           provideDocumentSemanticTokens: async (model) => {
-            if (model !== this.model || !this.isReady) {
-              return { data: new Uint32Array() };
+            if (model !== this.model) {
+              return this.lastSemanticTokens;
             }
 
-            try {
-              const tokens = await this.sendRequest('textDocument/semanticTokens/full', {
-                textDocument: { uri: this.uri }
-              });
-
-              const data = Array.isArray(tokens?.data) ? tokens.data : [];
-              return {
-                resultId: tokens?.resultId,
-                data: new Uint32Array(data)
-              };
-            } catch {
-              return { data: new Uint32Array() };
+            if (!this.isReady) {
+              return this.lastSemanticTokens;
             }
+
+            return this.lastSemanticTokens;
           },
           releaseDocumentSemanticTokens: () => {}
         }

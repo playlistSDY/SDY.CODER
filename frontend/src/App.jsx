@@ -93,6 +93,7 @@ const LAST_LANGUAGE_STORAGE_KEY = 'web-vscode:last-language';
 const GUEST_FILES_STORAGE_KEY = 'web-vscode:guest-files';
 const GUEST_SELECTED_FILE_ID_STORAGE_KEY = 'web-vscode:guest-selected-file-id';
 const CUSTOM_SNIPPETS_STORAGE_KEY = 'web-vscode:custom-snippets';
+const EDITOR_SETTINGS_STORAGE_KEY = 'web-vscode:editor-settings';
 const EXPLORER_WIDTH_STORAGE_KEY = 'web-vscode:explorer-width';
 const SIDE_PANE_WIDTH_STORAGE_KEY = 'web-vscode:side-pane-width';
 const SIDE_PANE_HEIGHT_STORAGE_KEY = 'web-vscode:side-pane-height';
@@ -101,12 +102,37 @@ const DEFAULT_SIDE_PANE_WIDTH_PX = 360;
 const DEFAULT_SIDE_PANE_HEIGHT_PX = 380;
 const WORKSPACE_RESIZER_MIN_EXPLORER_PX = 210;
 const WORKSPACE_RESIZER_MIN_EDITOR_PX = 420;
-const WORKSPACE_RESIZER_MIN_SIDE_PX = 280;
+const WORKSPACE_RESIZER_MIN_SIDE_PX = 200; // 인풋/아웃풋 가로 패널 최소 너비
 const WORKSPACE_RESIZER_MIN_EDITOR_HEIGHT_PX = 260;
 const WORKSPACE_RESIZER_MIN_SIDE_HEIGHT_PX = 220;
 const RESIZER_HEIGHT_PX = 8;
 const DEFAULT_PANEL_RATIOS = [0.28, 0.72, 0];
 const MIN_PANEL_HEIGHT_PX = 96;
+const AUTO_SAVE_DEBOUNCE_MS = 500;
+const DEFAULT_EDITOR_SETTINGS = {
+  theme: 'vscode-dark-modern',
+  fontFamily: "'Consolas', 'Monaco', 'Menlo', monospace",
+  fontSize: 14,
+  lineHeight: 22,
+  minimap: false,
+  semanticHighlighting: true,
+  fontLigatures: true,
+  wordWrap: 'off',
+  lineNumbers: 'on',
+  tabSize: 4
+};
+const EDITOR_THEME_OPTIONS = [
+  { value: 'vscode-dark-modern', label: 'VS Code Dark Modern' },
+  { value: 'vs-dark', label: 'Dark' },
+  { value: 'vs', label: 'Light' },
+  { value: 'hc-black', label: 'High Contrast' }
+];
+const EDITOR_FONT_OPTIONS = [
+  { value: "'Consolas', 'Monaco', 'Menlo', monospace", label: 'Consolas / Monaco' },
+  { value: "'JetBrains Mono', 'Consolas', 'Monaco', monospace", label: 'JetBrains Mono' },
+  { value: "'Fira Code', 'Consolas', 'Monaco', monospace", label: 'Fira Code' },
+  { value: "'Courier New', monospace", label: 'Courier New' }
+];
 const LEGACY_CSHARP_STARTER =
   `using System;\n\npublic class Main {\n    public static void Main(string[] args) {\n        Console.WriteLine(\"Hello, C#\");\n    }\n}\n`;
 const DEFAULT_NEW_FILE_BASENAME = 'untitled';
@@ -139,6 +165,105 @@ function saveLastLanguage(lang) {
   }
 }
 
+function normalizeEditorSettings(value) {
+  const next = value && typeof value === 'object' ? value : {};
+  return {
+    theme: typeof next.theme === 'string' ? next.theme : DEFAULT_EDITOR_SETTINGS.theme,
+    fontFamily: typeof next.fontFamily === 'string' ? next.fontFamily : DEFAULT_EDITOR_SETTINGS.fontFamily,
+    fontSize:
+      typeof next.fontSize === 'number' && Number.isFinite(next.fontSize)
+        ? Math.max(11, Math.min(24, next.fontSize))
+        : DEFAULT_EDITOR_SETTINGS.fontSize,
+    lineHeight:
+      typeof next.lineHeight === 'number' && Number.isFinite(next.lineHeight)
+        ? Math.max(16, Math.min(40, next.lineHeight))
+        : DEFAULT_EDITOR_SETTINGS.lineHeight,
+    minimap: typeof next.minimap === 'boolean' ? next.minimap : DEFAULT_EDITOR_SETTINGS.minimap,
+    semanticHighlighting:
+      typeof next.semanticHighlighting === 'boolean'
+        ? next.semanticHighlighting
+        : DEFAULT_EDITOR_SETTINGS.semanticHighlighting,
+    fontLigatures:
+      typeof next.fontLigatures === 'boolean' ? next.fontLigatures : DEFAULT_EDITOR_SETTINGS.fontLigatures,
+    wordWrap:
+      next.wordWrap === 'on' || next.wordWrap === 'off' || next.wordWrap === 'bounded'
+        ? next.wordWrap
+        : DEFAULT_EDITOR_SETTINGS.wordWrap,
+    lineNumbers:
+      next.lineNumbers === 'on' || next.lineNumbers === 'off' || next.lineNumbers === 'relative'
+        ? next.lineNumbers
+        : DEFAULT_EDITOR_SETTINGS.lineNumbers,
+    tabSize:
+      typeof next.tabSize === 'number' && Number.isFinite(next.tabSize)
+        ? Math.max(2, Math.min(8, next.tabSize))
+        : DEFAULT_EDITOR_SETTINGS.tabSize
+  };
+}
+
+function loadGuestEditorSettings() {
+  if (typeof window === 'undefined') {
+    return DEFAULT_EDITOR_SETTINGS;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(EDITOR_SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      return DEFAULT_EDITOR_SETTINGS;
+    }
+    return normalizeEditorSettings(JSON.parse(raw));
+  } catch {
+    return DEFAULT_EDITOR_SETTINGS;
+  }
+}
+
+function saveGuestEditorSettings(settings) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(EDITOR_SETTINGS_STORAGE_KEY, JSON.stringify(normalizeEditorSettings(settings)));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+function buildEditorOptions(settings, { readOnly = false } = {}) {
+  const normalized = normalizeEditorSettings(settings);
+  return {
+    minimap: { enabled: normalized.minimap },
+    'semanticHighlighting.enabled': normalized.semanticHighlighting,
+    fontFamily: normalized.fontFamily,
+    fontSize: normalized.fontSize,
+    lineHeight: normalized.lineHeight,
+    fontLigatures: normalized.fontLigatures,
+    smoothScrolling: true,
+    automaticLayout: true,
+    tabSize: normalized.tabSize,
+    insertSpaces: true,
+    lineNumbers: normalized.lineNumbers,
+    lineNumbersMinChars: 3,
+    wordWrap: normalized.wordWrap,
+    tabCompletion: 'on',
+    snippetSuggestions: 'inline',
+    acceptSuggestionOnEnter: 'on',
+    readOnly,
+    domReadOnly: readOnly,
+    suggest: {
+      showSnippets: true,
+      snippetsPreventQuickSuggestions: false
+    }
+  };
+}
+
+function getAppThemeName(editorTheme) {
+  if (editorTheme === 'vs') {
+    return 'light';
+  }
+  if (editorTheme === 'hc-black') {
+    return 'hc-black';
+  }
+  return 'dark';
+}
+
 function createEmptyCustomSnippet(languageId = DEFAULT_LANGUAGE) {
   return {
     id: null,
@@ -153,44 +278,47 @@ function normalizeCustomSnippetPrefix(prefix) {
   return String(prefix || '').trim();
 }
 
-function loadCustomSnippets() {
+function normalizeCustomSnippets(snippets) {
+  if (!Array.isArray(snippets)) {
+    return [];
+  }
+  return snippets
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.id === 'string' &&
+        isSupportedLanguage(entry.language) &&
+        typeof entry.prefix === 'string' &&
+        typeof entry.body === 'string'
+    )
+    .map((entry) => ({
+      id: entry.id,
+      language: entry.language,
+      prefix: normalizeCustomSnippetPrefix(entry.prefix),
+      description: typeof entry.description === 'string' ? entry.description : '',
+      body: entry.body
+    }))
+    .filter((entry) => entry.prefix && entry.body);
+}
+
+function loadGuestCustomSnippets() {
   if (typeof window === 'undefined') {
     return [];
   }
   try {
-    const raw = window.localStorage.getItem(CUSTOM_SNIPPETS_STORAGE_KEY);
-    const parsed = JSON.parse(raw || '[]');
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .filter(
-        (entry) =>
-          entry &&
-          typeof entry.id === 'string' &&
-          isSupportedLanguage(entry.language) &&
-          typeof entry.prefix === 'string' &&
-          typeof entry.body === 'string'
-      )
-      .map((entry) => ({
-        id: entry.id,
-        language: entry.language,
-        prefix: normalizeCustomSnippetPrefix(entry.prefix),
-        description: typeof entry.description === 'string' ? entry.description : '',
-        body: entry.body
-      }))
-      .filter((entry) => entry.prefix && entry.body);
+    const raw = window.sessionStorage.getItem(CUSTOM_SNIPPETS_STORAGE_KEY);
+    return normalizeCustomSnippets(JSON.parse(raw || '[]'));
   } catch {
     return [];
   }
 }
 
-function saveCustomSnippets(snippets) {
+function saveGuestCustomSnippets(snippets) {
   if (typeof window === 'undefined') {
     return;
   }
   try {
-    window.localStorage.setItem(CUSTOM_SNIPPETS_STORAGE_KEY, JSON.stringify(snippets));
+    window.sessionStorage.setItem(CUSTOM_SNIPPETS_STORAGE_KEY, JSON.stringify(normalizeCustomSnippets(snippets)));
   } catch {
     // Ignore storage errors.
   }
@@ -294,32 +422,6 @@ function saveGuestWorkspace(files, folders, selectedFileId) {
     window.localStorage.setItem(GUEST_FILES_STORAGE_KEY, JSON.stringify(sortFilesByName(files)));
     window.localStorage.setItem(`${GUEST_FILES_STORAGE_KEY}:folders`, JSON.stringify(sortFoldersByName(folders)));
     window.localStorage.setItem(GUEST_SELECTED_FILE_ID_STORAGE_KEY, selectedFileId || '');
-  } catch {
-    // Ignore storage errors.
-  }
-}
-
-function getUserSelectedFileStorageKey(userId) {
-  return `web-vscode:selected-file:${userId}`;
-}
-
-function loadUserSelectedFileId(userId) {
-  if (typeof window === 'undefined' || !userId) {
-    return null;
-  }
-  try {
-    return window.localStorage.getItem(getUserSelectedFileStorageKey(userId));
-  } catch {
-    return null;
-  }
-}
-
-function saveUserSelectedFileId(userId, fileId) {
-  if (typeof window === 'undefined' || !userId) {
-    return;
-  }
-  try {
-    window.localStorage.setItem(getUserSelectedFileStorageKey(userId), fileId || '');
   } catch {
     // Ignore storage errors.
   }
@@ -627,50 +729,49 @@ function defineDarkModernTheme(monaco) {
     rules: [
       { token: 'comment', foreground: '6A9955' },
       { token: 'keyword', foreground: 'C586C0' },
-      { token: 'keyword.control', foreground: 'C586C0' },
       { token: 'operator', foreground: 'C586C0' },
       { token: 'string', foreground: 'CE9178' },
-      { token: 'stringLiteral', foreground: 'CE9178' },
       { token: 'number', foreground: 'B5CEA8' },
-      { token: 'numberLiteral', foreground: 'B5CEA8' },
-      { token: 'namespace', foreground: '4EC9B0' },
-      { token: 'module', foreground: '4EC9B0' },
-      { token: 'module.defaultLibrary', foreground: '4EC9B0' },
       { token: 'type', foreground: '4EC9B0' },
-      { token: 'type.identifier', foreground: '4EC9B0' },
       { token: 'class', foreground: '4EC9B0' },
-      { token: 'class.defaultLibrary', foreground: '4EC9B0' },
-      { token: 'struct', foreground: '4EC9B0' },
-      { token: 'type.defaultLibrary', foreground: '4EC9B0' },
-      { token: 'templateType', foreground: '4EC9B0' },
-      { token: 'templateType.defaultLibrary', foreground: '4EC9B0' },
+      { token: 'interface', foreground: '4EC9B0' },
+      { token: 'namespace', foreground: '4EC9B0' },
+      { token: 'enumMember', foreground: '4FC1FF' },
       { token: 'variable', foreground: '9CDCFE' },
       { token: 'parameter', foreground: '9CDCFE' },
       { token: 'property', foreground: '9CDCFE' },
-      { token: 'enumMember', foreground: '4FC1FF' },
-      { token: 'variable.readonly', foreground: '4FC1FF' },
-      { token: 'variable.defaultLibrary', foreground: '4FC1FF' },
-      { token: 'newOperator', foreground: 'C586C0' },
-      { token: 'customLiteral', foreground: 'DCDCAA' },
       { token: 'function', foreground: 'DCDCAA' },
       { token: 'method', foreground: 'DCDCAA' },
-      { token: 'entity.name.function', foreground: 'DCDCAA' },
-      { token: 'support.function', foreground: 'DCDCAA' }
+      { token: 'regexp', foreground: 'D16969' },
+      { token: 'decorator', foreground: 'DCDCAA' }
     ],
     colors: {
       'editor.background': '#1F1F1F',
       'editor.foreground': '#CCCCCC',
-      'editor.findMatchBackground': '#9E6A03',
+      'editor.findMatchBackground': '#515C6A',
+      'editor.findMatchHighlightBackground': '#EA5C0055',
       'editor.lineHighlightBackground': '#2A2D2E',
-      'editor.selectionBackground': '#26477866',
+      'editor.selectionBackground': '#264F78',
+      'editor.selectionHighlightBackground': '#ADD6FF26',
       'editor.inactiveSelectionBackground': '#3A3D4166',
+      'editor.wordHighlightBackground': '#575757B8',
+      'editor.wordHighlightStrongBackground': '#004972B8',
       'editorCursor.foreground': '#CCCCCC',
       'editorLineNumber.foreground': '#6E7681',
       'editorLineNumber.activeForeground': '#CCCCCC',
       'editorIndentGuide.background1': '#404040',
       'editorIndentGuide.activeBackground1': '#707070',
+      'editorWhitespace.foreground': '#404040',
+      'editorBracketMatch.background': '#0064001A',
+      'editorBracketMatch.border': '#888888',
       'editorWidget.background': '#202020',
-      'editorOverviewRuler.border': '#010409'
+      'editorOverviewRuler.border': '#010409',
+      'editorHoverWidget.background': '#252526',
+      'editorHoverWidget.border': '#454545',
+      'editorSuggestWidget.background': '#252526',
+      'editorSuggestWidget.border': '#454545',
+      'editorSuggestWidget.selectedBackground': '#04395E',
+      'editorGutter.background': '#1F1F1F'
     }
   });
 }
@@ -718,7 +819,11 @@ export default function App() {
   const [collapsedFolderIds, setCollapsedFolderIds] = useState(() => new Set());
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [presetManagerModalOpen, setPresetManagerModalOpen] = useState(false);
-  const [customSnippets, setCustomSnippets] = useState(() => loadCustomSnippets());
+  const [editorSettingsModalOpen, setEditorSettingsModalOpen] = useState(false);
+  const [customSnippets, setCustomSnippets] = useState(() => loadGuestCustomSnippets());
+  const [editorSettings, setEditorSettings] = useState(() => loadGuestEditorSettings());
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [preferredSelectedFileId, setPreferredSelectedFileId] = useState(null);
   const [presetFilterLanguage, setPresetFilterLanguage] = useState(() => loadLastLanguage());
   const [presetDraft, setPresetDraft] = useState(() => createEmptyCustomSnippet(loadLastLanguage()));
   const [presetModalError, setPresetModalError] = useState('');
@@ -773,6 +878,9 @@ export default function App() {
   const foldersRef = useRef([]);
   const userRef = useRef(null);
   const stdinTextRef = useRef('');
+  const lastSyncedEditorSettingsRef = useRef(JSON.stringify(normalizeEditorSettings(loadGuestEditorSettings())));
+  const lastSyncedCustomSnippetsRef = useRef(JSON.stringify(normalizeCustomSnippets(loadGuestCustomSnippets())));
+  const lastSyncedSelectedFileIdRef = useRef(null);
   const selectedFile = files.find((item) => item.id === selectedFileId) || null;
   const activeFile = selectedFile;
   const hasFiles = files.length > 0;
@@ -971,7 +1079,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       saveTimersRef.current.delete(fileId);
       persistFilePatch(fileId, { content }).catch((error) => appendLog(`save failed: ${error.message}`));
-    }, 0);
+    }, AUTO_SAVE_DEBOUNCE_MS);
     saveTimersRef.current.set(fileId, timer);
   };
 
@@ -996,7 +1104,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       stdinSaveTimersRef.current.delete(fileId);
       persistFilePatch(fileId, { stdin }).catch((error) => appendLog(`stdin save failed: ${error.message}`));
-    }, 0);
+    }, AUTO_SAVE_DEBOUNCE_MS);
     stdinSaveTimersRef.current.set(fileId, timer);
   };
 
@@ -1084,7 +1192,9 @@ export default function App() {
     }
 
     const existing = modelsRef.current.get(file.id);
-    if (existing) {
+    if (existing && typeof existing.isDisposed === 'function' && existing.isDisposed()) {
+      modelsRef.current.delete(file.id);
+    } else if (existing) {
       return existing;
     }
 
@@ -1116,7 +1226,7 @@ export default function App() {
   };
 
   const syncSelectedFileModel = (file, editor = editorRef.current) => {
-    if (!file || !editor) {
+    if (!file || !editor || (typeof editor.isDisposed === 'function' && editor.isDisposed())) {
       return;
     }
     const model = ensureModelForFile(file, editor);
@@ -1127,7 +1237,7 @@ export default function App() {
   };
 
   const syncEmptyEditorModel = (editor = editorRef.current, monaco = monacoRef.current) => {
-    if (!editor) {
+    if (!editor || (typeof editor.isDisposed === 'function' && editor.isDisposed())) {
       return;
     }
     const model = ensureEmptyModel(monaco);
@@ -1215,12 +1325,14 @@ export default function App() {
       presetModelRef.current.dispose();
       presetModelRef.current = null;
     }
+    presetEditorRef.current = null;
+    presetMonacoRef.current = null;
   };
 
   const ensurePresetEditorModel = () => {
     const monaco = presetMonacoRef.current;
     const editor = presetEditorRef.current;
-    if (!monaco || !editor || !presetManagerModalOpen) {
+    if (!monaco || !editor || !presetManagerModalOpen || typeof editor.isDisposed === 'function' && editor.isDisposed()) {
       return null;
     }
 
@@ -1254,7 +1366,7 @@ export default function App() {
     }
 
     const model = presetModelRef.current;
-    if (editor.getModel() !== model) {
+    if (model && editor.getModel() !== model) {
       editor.setModel(model);
     }
     return { model, previewFile };
@@ -1305,7 +1417,8 @@ export default function App() {
     monacoRef.current = monaco;
 
     defineDarkModernTheme(monaco);
-    monaco.editor.setTheme('vscode-dark-modern');
+    monaco.editor.setTheme(editorSettings.theme);
+    editor.updateOptions(buildEditorOptions(editorSettings, { readOnly: !activeFileRef.current }));
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       if (!activeFileRef.current) {
         return;
@@ -1335,13 +1448,26 @@ export default function App() {
     modelStorageDisposablesRef.current.push(editor.onDidChangeModel(() => updateEditorStatusFromEditor(editor)));
   };
 
+  const onEditorUnmount = () => {
+    modelStorageDisposablesRef.current.forEach((disposable) => disposable.dispose());
+    modelStorageDisposablesRef.current = [];
+    editorRef.current = null;
+    monacoRef.current = null;
+  };
+
   const onPresetEditorMount = (editor, monaco) => {
     presetEditorRef.current = editor;
     presetMonacoRef.current = monaco;
 
     defineDarkModernTheme(monaco);
-    monaco.editor.setTheme('vscode-dark-modern');
+    monaco.editor.setTheme(editorSettings.theme);
+    editor.updateOptions(buildEditorOptions(editorSettings));
     void bootPresetEditorLsp();
+  };
+
+  const onPresetEditorUnmount = () => {
+    presetEditorRef.current = null;
+    presetMonacoRef.current = null;
   };
 
   useEffect(() => {
@@ -1455,6 +1581,116 @@ export default function App() {
   }, [sidePaneHeight]);
 
   useEffect(() => {
+    if (authLoading) {
+      setPreferencesReady(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadPreferences = async () => {
+      if (!user) {
+        const nextEditorSettings = normalizeEditorSettings(loadGuestEditorSettings());
+        const nextCustomSnippets = normalizeCustomSnippets(loadGuestCustomSnippets());
+        const guestWorkspace = loadGuestWorkspace();
+        lastSyncedEditorSettingsRef.current = JSON.stringify(nextEditorSettings);
+        lastSyncedCustomSnippetsRef.current = JSON.stringify(nextCustomSnippets);
+        lastSyncedSelectedFileIdRef.current = guestWorkspace.selectedFileId || null;
+        if (cancelled) {
+          return;
+        }
+        setEditorSettings(nextEditorSettings);
+        setCustomSnippets(nextCustomSnippets);
+        setPreferredSelectedFileId(guestWorkspace.selectedFileId || null);
+        setPreferencesReady(true);
+        return;
+      }
+
+      try {
+        const payload = await fetchJson('/api/preferences');
+        if (cancelled) {
+          return;
+        }
+        const nextEditorSettings = normalizeEditorSettings(payload.editorSettings);
+        const nextCustomSnippets = normalizeCustomSnippets(payload.customSnippets);
+        const nextSelectedFileId = typeof payload.selectedFileId === 'string' && payload.selectedFileId ? payload.selectedFileId : null;
+        lastSyncedEditorSettingsRef.current = JSON.stringify(nextEditorSettings);
+        lastSyncedCustomSnippetsRef.current = JSON.stringify(nextCustomSnippets);
+        lastSyncedSelectedFileIdRef.current = nextSelectedFileId;
+        setEditorSettings(nextEditorSettings);
+        setCustomSnippets(nextCustomSnippets);
+        setPreferredSelectedFileId(nextSelectedFileId);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        appendLog(`preferences load failed: ${error.message}`);
+        const fallbackEditorSettings = DEFAULT_EDITOR_SETTINGS;
+        const fallbackCustomSnippets = [];
+        lastSyncedEditorSettingsRef.current = JSON.stringify(fallbackEditorSettings);
+        lastSyncedCustomSnippetsRef.current = JSON.stringify(fallbackCustomSnippets);
+        lastSyncedSelectedFileIdRef.current = null;
+        setEditorSettings(fallbackEditorSettings);
+        setCustomSnippets(fallbackCustomSnippets);
+        setPreferredSelectedFileId(null);
+      } finally {
+        if (!cancelled) {
+          setPreferencesReady(true);
+        }
+      }
+    };
+
+    void loadPreferences();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, user]);
+
+  useEffect(() => {
+    if (!preferencesReady) {
+      return;
+    }
+    const normalized = normalizeEditorSettings(editorSettings);
+    const serialized = JSON.stringify(normalized);
+    if (serialized === lastSyncedEditorSettingsRef.current) {
+      return;
+    }
+    lastSyncedEditorSettingsRef.current = serialized;
+    if (!user) {
+      saveGuestEditorSettings(normalized);
+      return;
+    }
+    void fetchJson('/api/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ editorSettings: normalized })
+    }).catch((error) => {
+      appendLog(`editor settings save failed: ${error.message}`);
+    });
+  }, [preferencesReady, user, editorSettings]);
+
+  useEffect(() => {
+    if (!preferencesReady) {
+      return;
+    }
+    const normalized = normalizeCustomSnippets(customSnippets);
+    const serialized = JSON.stringify(normalized);
+    if (serialized === lastSyncedCustomSnippetsRef.current) {
+      return;
+    }
+    lastSyncedCustomSnippetsRef.current = serialized;
+    if (!user) {
+      saveGuestCustomSnippets(normalized);
+      return;
+    }
+    void fetchJson('/api/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ customSnippets: normalized })
+    }).catch((error) => {
+      appendLog(`preset save failed: ${error.message}`);
+    });
+  }, [preferencesReady, user, customSnippets]);
+
+  useEffect(() => {
     if (typeof window === 'undefined') {
       return undefined;
     }
@@ -1473,6 +1709,43 @@ export default function App() {
     }
     logsBodyRef.current.scrollTop = logsBodyRef.current.scrollHeight;
   }, [logs]);
+
+  useEffect(() => {
+    if (monacoRef.current) {
+      defineDarkModernTheme(monacoRef.current);
+      monacoRef.current.editor.setTheme(editorSettings.theme);
+    }
+    if (editorRef.current && !(typeof editorRef.current.isDisposed === 'function' && editorRef.current.isDisposed())) {
+      editorRef.current.updateOptions(buildEditorOptions(editorSettings, { readOnly: !activeFileRef.current }));
+    }
+    if (presetMonacoRef.current) {
+      defineDarkModernTheme(presetMonacoRef.current);
+      presetMonacoRef.current.editor.setTheme(editorSettings.theme);
+    }
+    if (
+      presetEditorRef.current &&
+      !(typeof presetEditorRef.current.isDisposed === 'function' && presetEditorRef.current.isDisposed())
+    ) {
+      presetEditorRef.current.updateOptions(buildEditorOptions(editorSettings));
+    }
+  }, [editorSettings]);
+
+  useEffect(() => {
+    if (editorRef.current && !(typeof editorRef.current.isDisposed === 'function' && editorRef.current.isDisposed())) {
+      editorRef.current.updateOptions({ readOnly: !activeFile, domReadOnly: !activeFile });
+    }
+  }, [!!activeFile]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return undefined;
+    }
+    const themeName = getAppThemeName(editorSettings.theme);
+    document.documentElement.setAttribute('data-app-theme', themeName);
+    return () => {
+      document.documentElement.removeAttribute('data-app-theme');
+    };
+  }, [editorSettings.theme]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1550,6 +1823,10 @@ export default function App() {
       setWorkspaceReady(false);
       return;
     }
+    if (user && !preferencesReady) {
+      setWorkspaceReady(false);
+      return;
+    }
     if (!user) {
       const guestWorkspace = loadGuestWorkspace();
       setFiles(guestWorkspace.files);
@@ -1571,11 +1848,10 @@ export default function App() {
         const nextFiles = sortFilesByName(payload.files || []);
         const nextFolders = sortFoldersByName(payload.folders || []);
         setFolders(nextFolders);
-        const storedSelectedFileId = loadUserSelectedFileId(user?.id);
         setFiles(nextFiles);
         setSelectedFileId((prev) => {
-          if (storedSelectedFileId && nextFiles.some((file) => file.id === storedSelectedFileId)) {
-            return storedSelectedFileId;
+          if (preferredSelectedFileId && nextFiles.some((file) => file.id === preferredSelectedFileId)) {
+            return preferredSelectedFileId;
           }
           return prev && nextFiles.some((file) => file.id === prev) ? prev : nextFiles[0]?.id || null;
         });
@@ -1592,7 +1868,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [authLoading, user]);
+  }, [authLoading, user, preferencesReady]);
 
   useEffect(() => {
     if (authLoading || user) {
@@ -1602,11 +1878,24 @@ export default function App() {
   }, [authLoading, user, files, folders, selectedFileId]);
 
   useEffect(() => {
-    if (!user?.id) {
+    if (!preferencesReady) {
       return;
     }
-    saveUserSelectedFileId(user.id, selectedFileId);
-  }, [user?.id, selectedFileId]);
+    const normalized = selectedFileId || null;
+    if (normalized === lastSyncedSelectedFileIdRef.current) {
+      return;
+    }
+    lastSyncedSelectedFileIdRef.current = normalized;
+    if (!user) {
+      return;
+    }
+    void fetchJson('/api/preferences', {
+      method: 'PATCH',
+      body: JSON.stringify({ selectedFileId: normalized })
+    }).catch((error) => {
+      appendLog(`selected file save failed: ${error.message}`);
+    });
+  }, [preferencesReady, user, selectedFileId]);
 
   useEffect(() => {
     if (!googleClientId || user || !explorerOpen) {
@@ -1615,6 +1904,7 @@ export default function App() {
 
     let cancelled = false;
     const scriptId = 'google-gsi-script';
+    const appThemeName = getAppThemeName(editorSettings.theme);
     const initGoogle = () => {
       if (cancelled || !window.google?.accounts?.id) {
         return;
@@ -1645,7 +1935,7 @@ export default function App() {
         target.innerHTML = '';
         const slotWidth = Math.round(target.parentElement?.getBoundingClientRect?.().width || 160);
         window.google.accounts.id.renderButton(target, {
-          theme: 'filled_black',
+          theme: appThemeName === 'light' ? 'outline' : appThemeName === 'hc-black' ? 'filled_black' : 'filled_black',
           size: 'medium',
           text: 'signin_with',
           width: Math.max(140, Math.min(slotWidth, 170))
@@ -1670,7 +1960,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [googleClientId, user, explorerOpen]);
+  }, [googleClientId, user, explorerOpen, editorSettings.theme]);
 
   useEffect(() => {
     return () => {
@@ -2766,6 +3056,10 @@ export default function App() {
       });
       modelStorageDisposablesRef.current.push(disposable);
       modelsRef.current.set(nextFile.id, replacement);
+      if (editorRef.current?.getModel() === oldModel) {
+        editorRef.current.setModel(replacement);
+        updateEditorStatusFromEditor(editorRef.current);
+      }
       oldModel.dispose();
     }
     setFiles((prev) => {
@@ -2838,6 +3132,22 @@ export default function App() {
     setPresetDraft(createEmptyCustomSnippet(presetFilterLanguage));
   };
 
+  const openEditorSettingsModal = () => {
+    setEditorSettingsModalOpen(true);
+  };
+
+  const closeEditorSettingsModal = () => {
+    setEditorSettingsModalOpen(false);
+  };
+
+  const updateEditorSetting = (key, value) => {
+    setEditorSettings((prev) => normalizeEditorSettings({ ...prev, [key]: value }));
+  };
+
+  const resetEditorSettings = () => {
+    setEditorSettings(DEFAULT_EDITOR_SETTINGS);
+  };
+
   const startNewPresetDraft = (languageId = presetFilterLanguage) => {
     setPresetDraft(createEmptyCustomSnippet(languageId));
     setPresetModalError('');
@@ -2903,7 +3213,6 @@ export default function App() {
       : [...customSnippets, nextSnippet];
 
     setCustomSnippets(nextSnippets);
-    saveCustomSnippets(nextSnippets);
     setPresetFilterLanguage(nextSnippet.language);
     setPresetDraft(nextSnippet);
     setPresetModalError('');
@@ -2920,7 +3229,6 @@ export default function App() {
     }
     const nextSnippets = customSnippets.filter((snippet) => snippet.id !== presetDraft.id);
     setCustomSnippets(nextSnippets);
-    saveCustomSnippets(nextSnippets);
     appendLog(`preset deleted: ${presetDraft.language}/${presetDraft.prefix}`);
     startNewPresetDraft(presetDraft.language);
   };
@@ -3042,8 +3350,17 @@ export default function App() {
           <span>SDY.CODER</span>
         </div>
         <div className="controls">
+          <button type="button" className="control-btn secondary-btn" onClick={openEditorSettingsModal}>
+            <span className="toolbar-btn-icon" aria-hidden="true">
+              ⚙
+            </span>
+            <span>Settings</span>
+          </button>
           <button type="button" className="control-btn secondary-btn" onClick={openPresetManagerModal}>
-            Presets
+            <span className="toolbar-btn-icon toolbar-btn-icon-code" aria-hidden="true">
+              {'</>'}
+            </span>
+            <span>Presets</span>
           </button>
           <button
             type="button"
@@ -3051,7 +3368,10 @@ export default function App() {
             onClick={openResetModal}
             disabled={running || !activeFile}
           >
-            Reset
+            <span className="toolbar-btn-icon" aria-hidden="true">
+              🗑
+            </span>
+            <span>Reset</span>
           </button>
           <button
             type="button"
@@ -3061,7 +3381,10 @@ export default function App() {
             title={running ? 'Stop (Ctrl/Cmd+Enter)' : 'Run (Ctrl/Cmd+Enter)'}
             aria-keyshortcuts="Control+Enter Meta+Enter"
           >
-            {running ? 'Stop' : 'Run'}
+            <span className="toolbar-btn-icon" aria-hidden="true">
+              {running ? '■' : '▶'}
+            </span>
+            <span>{running ? 'Stop' : 'Run'}</span>
           </button>
         </div>
       </header>
@@ -3347,28 +3670,10 @@ export default function App() {
                 height="100%"
                 defaultLanguage="plaintext"
                 defaultValue=""
-                theme="vscode-dark-modern"
+                theme={editorSettings.theme}
                 onMount={onEditorMount}
-                options={{
-                  minimap: { enabled: false },
-                  'semanticHighlighting.enabled': true,
-                  fontSize: 14,
-                  fontLigatures: true,
-                  smoothScrolling: true,
-                  automaticLayout: true,
-                  tabSize: 4,
-                  insertSpaces: true,
-                  lineNumbersMinChars: 3,
-                  tabCompletion: 'on',
-                  snippetSuggestions: 'inline',
-                  acceptSuggestionOnEnter: 'on',
-                  readOnly: !activeFile,
-                  domReadOnly: !activeFile,
-                  suggest: {
-                    showSnippets: true,
-                    snippetsPreventQuickSuggestions: false
-                  }
-                }}
+                onUnmount={onEditorUnmount}
+                options={buildEditorOptions(editorSettings, { readOnly: !activeFile })}
               />
             ) : (
               <div className="editor-empty-state">
@@ -3451,6 +3756,145 @@ export default function App() {
           </div>
         </section>
       </main>
+      {editorSettingsModalOpen ? (
+        <div className="modal-backdrop" onClick={closeEditorSettingsModal}>
+          <div
+            className="confirm-modal editor-settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="editor-settings-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-modal-title" id="editor-settings-title">
+              Editor Settings
+            </div>
+            <div className="confirm-modal-body">
+              메인 에디터와 프리셋 에디터에 공통으로 적용됩니다.
+            </div>
+            <div className="editor-settings-grid">
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Theme</span>
+                <select
+                  className="file-name-input modal-select editor-settings-select"
+                  value={editorSettings.theme}
+                  onChange={(event) => updateEditorSetting('theme', event.target.value)}
+                >
+                  {EDITOR_THEME_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Font</span>
+                <select
+                  className="file-name-input modal-select editor-settings-select"
+                  value={editorSettings.fontFamily}
+                  onChange={(event) => updateEditorSetting('fontFamily', event.target.value)}
+                >
+                  {EDITOR_FONT_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Font Size</span>
+                <input
+                  type="number"
+                  min="11"
+                  max="24"
+                  className="file-name-input modal-select editor-settings-number"
+                  value={editorSettings.fontSize}
+                  onChange={(event) => updateEditorSetting('fontSize', Number(event.target.value || DEFAULT_EDITOR_SETTINGS.fontSize))}
+                />
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Line Height</span>
+                <input
+                  type="number"
+                  min="16"
+                  max="40"
+                  className="file-name-input modal-select editor-settings-number"
+                  value={editorSettings.lineHeight}
+                  onChange={(event) => updateEditorSetting('lineHeight', Number(event.target.value || DEFAULT_EDITOR_SETTINGS.lineHeight))}
+                />
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Tab Size</span>
+                <input
+                  type="number"
+                  min="2"
+                  max="8"
+                  className="file-name-input modal-select editor-settings-number"
+                  value={editorSettings.tabSize}
+                  onChange={(event) => updateEditorSetting('tabSize', Number(event.target.value || DEFAULT_EDITOR_SETTINGS.tabSize))}
+                />
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Word Wrap</span>
+                <select
+                  className="file-name-input modal-select editor-settings-select"
+                  value={editorSettings.wordWrap}
+                  onChange={(event) => updateEditorSetting('wordWrap', event.target.value)}
+                >
+                  <option value="off">Off</option>
+                  <option value="on">On</option>
+                  <option value="bounded">Bounded</option>
+                </select>
+              </label>
+              <label className="editor-settings-field">
+                <span className="editor-settings-label">Line Numbers</span>
+                <select
+                  className="file-name-input modal-select editor-settings-select"
+                  value={editorSettings.lineNumbers}
+                  onChange={(event) => updateEditorSetting('lineNumbers', event.target.value)}
+                >
+                  <option value="on">On</option>
+                  <option value="off">Off</option>
+                  <option value="relative">Relative</option>
+                </select>
+              </label>
+              <div className="editor-settings-toggle-row">
+                <label className="editor-settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={editorSettings.minimap}
+                    onChange={(event) => updateEditorSetting('minimap', event.target.checked)}
+                  />
+                  <span>Show minimap</span>
+                </label>
+                <label className="editor-settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={editorSettings.semanticHighlighting}
+                    onChange={(event) => updateEditorSetting('semanticHighlighting', event.target.checked)}
+                  />
+                  <span>Enable semantic highlighting</span>
+                </label>
+                <label className="editor-settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={editorSettings.fontLigatures}
+                    onChange={(event) => updateEditorSetting('fontLigatures', event.target.checked)}
+                  />
+                  <span>Enable font ligatures</span>
+                </label>
+              </div>
+            </div>
+            <div className="confirm-modal-actions">
+              <button type="button" className="control-btn danger-btn" onClick={resetEditorSettings}>
+                Reset Defaults
+              </button>
+              <button type="button" className="control-btn secondary-btn" onClick={closeEditorSettingsModal}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {presetManagerModalOpen ? (
         <div className="modal-backdrop" onClick={closePresetManagerModal}>
           <div
@@ -3528,22 +3972,10 @@ export default function App() {
                     height="260px"
                     defaultLanguage="plaintext"
                     defaultValue=""
-                    theme="vscode-dark-modern"
+                    theme={editorSettings.theme}
                     onMount={onPresetEditorMount}
-                    options={{
-                      minimap: { enabled: false },
-                      'semanticHighlighting.enabled': true,
-                      fontSize: 13,
-                      fontLigatures: true,
-                      smoothScrolling: true,
-                      automaticLayout: true,
-                      tabSize: 2,
-                      insertSpaces: true,
-                      lineNumbersMinChars: 3,
-                      tabCompletion: 'on',
-                      snippetSuggestions: 'inline',
-                      acceptSuggestionOnEnter: 'on'
-                    }}
+                    onUnmount={onPresetEditorUnmount}
+                    options={buildEditorOptions(editorSettings)}
                   />
                 </div>
                 <div className="preset-help-text">
