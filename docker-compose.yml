@@ -10,6 +10,7 @@ services:
       RUN_TIMEOUT_MS: "30000"
       SANDBOX_PROVIDER: "docker"
       SANDBOX_IMAGE: "web-vscode-backend:latest"
+      SANDBOX_ENABLE_GPU: "0"
       SANDBOX_CPU_LIMIT: "1.0"
       SANDBOX_MEMORY_LIMIT: "512m"
       SANDBOX_PIDS_LIMIT: "128"

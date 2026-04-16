@@ -28,6 +28,7 @@ const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 
 
 const SANDBOX_PROVIDER = process.env.SANDBOX_PROVIDER || 'docker';
 const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE || 'web-vscode-backend:latest';
+const SANDBOX_ENABLE_GPU = /^(1|true|yes|on)$/i.test(String(process.env.SANDBOX_ENABLE_GPU || '0'));
 const SANDBOX_CPU_LIMIT = process.env.SANDBOX_CPU_LIMIT || '1.0';
 const SANDBOX_MEMORY_LIMIT = process.env.SANDBOX_MEMORY_LIMIT || '512m';
 const SANDBOX_PIDS_LIMIT = Number(process.env.SANDBOX_PIDS_LIMIT || 128);
@@ -1897,6 +1898,10 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     '-c',
     shellCommand
   ];
+
+  if (SANDBOX_ENABLE_GPU) {
+    args.splice(4, 0, '--gpus', 'all');
+  }
 
   let phaseBuffer = '';
   let stderrRelayBuffer = '';
