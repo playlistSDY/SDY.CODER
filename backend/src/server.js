@@ -47,6 +47,7 @@ const SANDBOX_MEM_PEAK_MARKER = '__WEB_SANDBOX_MEM_PEAK_BYTES__=';
 const PHASE_MARKER = '__WEB_PHASE__=';
 const ARTIFACT_MARKER = '__WEB_ARTIFACT__=';
 const PLOT_OUTPUT_MARKER = '__WEB_PLOT__=';
+const PLOT_WRAPPER_ERROR_MARKER = '__WEB_PLOT_WRAPPER_ERROR__=';
 const RUNTIME_INFO_TTL_MS = Number(process.env.RUNTIME_INFO_TTL_MS || 10 * 60 * 1000);
 const MAX_RESULT_ARTIFACTS = 4;
 const MAX_RESULT_ARTIFACT_BYTES = 2 * 1024 * 1024;
@@ -1005,6 +1006,7 @@ function stripExecutionMarker(stdout = '', stderr = '') {
   let sandboxCpuMilliPct = null;
   let sandboxMemPeakBytes = null;
   const artifacts = [];
+  const plotWrapperWarnings = [];
 
   const strip = (text) => {
     const lines = text.split('\n');
@@ -1049,6 +1051,13 @@ function stripExecutionMarker(stdout = '', stderr = '') {
         }
         continue;
       }
+      if (line.startsWith(PLOT_WRAPPER_ERROR_MARKER)) {
+        const warning = line.slice(PLOT_WRAPPER_ERROR_MARKER.length).trim();
+        if (warning) {
+          plotWrapperWarnings.push(warning);
+        }
+        continue;
+      }
       if (line.startsWith(PHASE_MARKER)) {
         continue;
       }
@@ -1074,7 +1083,8 @@ function stripExecutionMarker(stdout = '', stderr = '') {
       sandboxMemPeakBytes === null || Number.isNaN(sandboxMemPeakBytes) ? null : sandboxMemPeakBytes,
     containerOpenMs:
       openNs === null || Number.isNaN(openNs) ? null : Number((openNs / 1_000_000).toFixed(3)),
-    artifacts
+    artifacts,
+    plotWrapperWarnings
   };
 }
 
@@ -1647,44 +1657,171 @@ function shouldWrapPythonForPlots(code) {
   return /matplotlib|pyplot|plt\.show\s*\(/i.test(text);
 }
 
+const PYTHON_PLOT_BOOTSTRAP = String.raw`import builtins as __sdy_builtins
+import os as __sdy_os
+import sys as __sdy_sys
+
+__sdy_os.environ.setdefault("MPLBACKEND", "Agg")
+__sdy_plot_counter = 0
+
+def __sdy_emit_plot_wrapper_error(message):
+    try:
+        __sdy_text = str(message).replace("\n", " ").strip()
+        if not __sdy_text:
+            __sdy_text = "unknown plot wrapper error"
+        __sdy_sys.stderr.write("${PLOT_WRAPPER_ERROR_MARKER}" + __sdy_text + "\n")
+    except Exception:
+        pass
+
+def __sdy_patch_matplotlib():
+    try:
+        import matplotlib.pyplot as __sdy_plt
+    except Exception as __sdy_exc:
+        __sdy_emit_plot_wrapper_error(f"failed to import matplotlib.pyplot: {__sdy_exc}")
+        return
+
+    if getattr(__sdy_plt, "__sdy_show_patched__", False):
+        return
+
+    __sdy_original_show = getattr(__sdy_plt, "show", None)
+
+    def __sdy_show(*args, **kwargs):
+        global __sdy_plot_counter
+        try:
+            for __sdy_num in list(__sdy_plt.get_fignums()):
+                __sdy_fig = __sdy_plt.figure(__sdy_num)
+                __sdy_plot_counter += 1
+                __sdy_name = f"__sdy_plot_{__sdy_plot_counter}.png"
+                __sdy_fig.savefig(__sdy_name, bbox_inches="tight")
+                print("${PLOT_OUTPUT_MARKER}" + __sdy_name)
+            return None
+        except Exception as __sdy_exc:
+            __sdy_emit_plot_wrapper_error(f"failed to capture plt.show(): {__sdy_exc}")
+            if callable(__sdy_original_show):
+                try:
+                    return __sdy_original_show(*args, **kwargs)
+                except Exception:
+                    return None
+            return None
+
+    __sdy_plt.show = __sdy_show
+    __sdy_plt.__sdy_show_patched__ = True
+
+try:
+    __sdy_patch_matplotlib()
+except Exception as __sdy_exc:
+    __sdy_emit_plot_wrapper_error(f"failed to patch matplotlib: {__sdy_exc}")
+`;
+
+function getPythonPlotWrapperLineOffset(code) {
+  if (!shouldWrapPythonForPlots(code)) {
+    return 0;
+  }
+  return `${PYTHON_PLOT_BOOTSTRAP}\n`.split('\n').length - 1;
+}
+
+function remapPythonTraceback(stderr, code) {
+  const offset = getPythonPlotWrapperLineOffset(code);
+  if (!offset || !stderr) {
+    return stderr || '';
+  }
+
+  return String(stderr).replace(/(File ".*?main\.py", line )(\d+)/g, (full, prefix, rawLine) => {
+    const lineNumber = Number(rawLine);
+    if (!Number.isFinite(lineNumber)) {
+      return full;
+    }
+    const remapped = lineNumber - offset;
+    return `${prefix}${remapped > 0 ? remapped : lineNumber}`;
+  });
+}
+
+function stripPlotWrapperWarnings(stderr = '') {
+  const warnings = [];
+  const kept = String(stderr || '')
+    .split('\n')
+    .filter((line) => {
+      if (!line.startsWith(PLOT_WRAPPER_ERROR_MARKER)) {
+        return true;
+      }
+      const warning = line.slice(PLOT_WRAPPER_ERROR_MARKER.length).trim();
+      if (warning) {
+        warnings.push(warning);
+      }
+      return false;
+    })
+    .join('\n');
+
+  return { stderr: kept, plotWrapperWarnings: warnings };
+}
+
+function sanitizeRuntimeStderr(language, stderr = '') {
+  if (language !== 'python' || !stderr) {
+    return { stderr: stderr || '', runtimeNotices: [] };
+  }
+
+  const runtimeNotices = [];
+  let tensorflowCpuFallback = false;
+
+  const kept = String(stderr)
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return true;
+      }
+
+      if (/^WARNING: All log messages before absl::InitializeLog\(\) is called are written to STDERR$/i.test(trimmed)) {
+        return false;
+      }
+
+      if (/^I\d{4} .*cudart_stub\.cc:\d+\] Could not find cuda drivers on your machine, GPU will not be used\.$/.test(trimmed)) {
+        tensorflowCpuFallback = true;
+        return false;
+      }
+
+      if (/^I\d{4} .*cpu_feature_guard\.cc:\d+\] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations\.$/.test(trimmed)) {
+        return false;
+      }
+
+      if (/^To enable the following instructions: .* rebuild TensorFlow with the appropriate compiler flags\.$/.test(trimmed)) {
+        return false;
+      }
+
+      if (/^\/usr\/lib\/python3\/dist-packages\/requests\/__init__\.py:\d+: RequestsDependencyWarning: /.test(trimmed)) {
+        return false;
+      }
+
+      if (/^warnings\.warn\($/.test(trimmed)) {
+        return false;
+      }
+
+      if (/^[IE]\d{4} .*cuda_platform\.cc:\d+\] failed call to cuInit: /.test(trimmed)) {
+        tensorflowCpuFallback = true;
+        return false;
+      }
+
+      return true;
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
+
+  if (tensorflowCpuFallback) {
+    runtimeNotices.push(
+      'TensorFlow GPU initialization was not available in the sandbox, so TensorFlow ran on CPU for this execution.'
+    );
+  }
+
+  return { stderr: kept, runtimeNotices };
+}
+
 function wrapPythonCodeForPlots(code) {
   const userCode = String(code || '');
   if (!shouldWrapPythonForPlots(userCode)) {
     return userCode;
   }
 
-  const bootstrap = String.raw`import builtins as __sdy_builtins
-import os as __sdy_os
-
-__sdy_os.environ.setdefault("MPLBACKEND", "Agg")
-__sdy_plot_counter = 0
-
-def __sdy_patch_matplotlib():
-    try:
-        import matplotlib.pyplot as __sdy_plt
-    except Exception:
-        return
-
-    if getattr(__sdy_plt, "__sdy_show_patched__", False):
-        return
-
-    def __sdy_show(*args, **kwargs):
-        global __sdy_plot_counter
-        for __sdy_num in list(__sdy_plt.get_fignums()):
-            __sdy_fig = __sdy_plt.figure(__sdy_num)
-            __sdy_plot_counter += 1
-            __sdy_name = f"__sdy_plot_{__sdy_plot_counter}.png"
-            __sdy_fig.savefig(__sdy_name, bbox_inches="tight")
-            print("${PLOT_OUTPUT_MARKER}" + __sdy_name)
-        return None
-
-    __sdy_plt.show = __sdy_show
-    __sdy_plt.__sdy_show_patched__ = True
-
-__sdy_patch_matplotlib()
-`;
-
-  return `${bootstrap}\n${userCode}`;
+  return `${PYTHON_PLOT_BOOTSTRAP}\n${userCode}`;
 }
 
 function forceRemoveDockerContainer(containerName) {
@@ -1878,6 +2015,14 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
   }
 
   const cleaned = stripExecutionMarker(result.stdout, result.stderr);
+  if (language === 'python') {
+    cleaned.stderr = remapPythonTraceback(cleaned.stderr, code);
+    const runtimeSanitized = sanitizeRuntimeStderr(language, cleaned.stderr);
+    cleaned.stderr = runtimeSanitized.stderr;
+    cleaned.runtimeNotices = runtimeSanitized.runtimeNotices;
+  } else {
+    cleaned.runtimeNotices = [];
+  }
   if (hostContainerOpenMs !== null) {
     cleaned.containerOpenMs = hostContainerOpenMs;
   }
@@ -1909,6 +2054,8 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     sandboxMemoryLimitBytes: parseMemoryLimitToBytes(SANDBOX_MEMORY_LIMIT),
     containerOpenMs: cleaned.containerOpenMs,
     artifacts: cleaned.artifacts,
+    plotWrapperWarnings: cleaned.plotWrapperWarnings,
+    runtimeNotices: cleaned.runtimeNotices,
     logs,
     compileError: spec.hasCompileStep && result.code === COMPILE_ERROR_EXIT_CODE
   };
@@ -1942,11 +2089,26 @@ async function runCodeLocally(language, code, stdinText = '', options = {}) {
         input: stdinText,
         runControl
       });
+      result.stderr = remapPythonTraceback(result.stderr, code);
+      const plotWrapperInfo = stripPlotWrapperWarnings(result.stderr);
+      result.stderr = plotWrapperInfo.stderr;
+      const runtimeSanitized = sanitizeRuntimeStderr(language, result.stderr);
+      result.stderr = runtimeSanitized.stderr;
       const executionMs = Number((Number(process.hrtime.bigint() - startedAt) / 1_000_000).toFixed(3));
       emitPhase('run_end', { ms: executionMs });
       logs.push(`  code execution time: ${(executionMs / 1000).toFixed(6)} s`);
       const artifacts = await collectExecutionArtifacts(tempDir, language);
-      return { ...result, executionMs, compileMs: null, containerOpenMs: null, logs, compileError: false, artifacts };
+      return {
+        ...result,
+        executionMs,
+        compileMs: null,
+        containerOpenMs: null,
+        logs,
+        compileError: false,
+        artifacts,
+        plotWrapperWarnings: plotWrapperInfo.plotWrapperWarnings,
+        runtimeNotices: runtimeSanitized.runtimeNotices
+      };
     }
 
     if (language === 'c') {
@@ -2276,6 +2438,27 @@ function appendRuntimeDiagnostic(stderr, result) {
       `CPU was saturated near the sandbox limit (${cpu.toFixed(1)}% of ${cpuLimit} vCPU), which can contribute to timeout.`
     );
   }
+
+  const plotWrapperWarnings = Array.isArray(result?.plotWrapperWarnings)
+    ? result.plotWrapperWarnings.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  if (plotWrapperWarnings.length > 0) {
+    notes.push(
+      'Plot preview notice: SDY.CODER could not capture one or more matplotlib figures for inline display. Your Python code still ran, but the browser plot preview could not be generated.'
+    );
+    notes.push(
+      'Try using the standard pattern `import matplotlib.pyplot as plt` and `plt.show()` without overriding `plt.show()` or changing the matplotlib backend manually.'
+    );
+    const firstWarning = plotWrapperWarnings[0].trim();
+    if (firstWarning) {
+      notes.push(`Plot capture detail: ${firstWarning}`);
+    }
+  }
+
+  const runtimeNotices = Array.isArray(result?.runtimeNotices)
+    ? result.runtimeNotices.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  runtimeNotices.forEach((notice) => notes.push(notice.trim()));
 
   if (notes.length === 0) {
     return base;
