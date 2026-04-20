@@ -6,35 +6,7 @@ WORKDIR /app/backend
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
-    python3-numpy \
-    python3-pandas \
-    python3-requests \
-    python3-dev \
-    gcc \
-    g++ \
-    gfortran \
-    make \
-    cmake \
-    pkg-config \
-    libssl-dev \
-    libcurl4-openssl-dev \
-    libopenblas-dev \
-    liblapack-dev \
-    libeigen3-dev \
-    libgmp-dev \
-    libmpfr-dev \
-    nlohmann-json3-dev \
-    clangd \
-    libgoogle-gson-java \
-    libcommons-lang3-java \
-    libcommons-math3-java \
-    libejml-java \
-    mono-mcs \
-    mono-runtime \
-    docker.io \
+    ca-certificates \
     curl \
     tar \
     unzip \
@@ -42,14 +14,17 @@ RUN apt-get update \
     bc \
     sqlite3 \
     gnuplot-nox \
-    ca-certificates \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    pkg-config \
+    make \
+    cmake \
+    gcc \
+    g++ \
+    gfortran \
   && rm -rf /var/lib/apt/lists/*
-
-COPY backend/python-requirements.txt ./python-requirements.txt
-
-RUN python3 -m pip install --break-system-packages --no-cache-dir \
-    -r ./python-requirements.txt \
-    "python-lsp-server[all]"
 
 COPY --from=golang_toolchain /usr/local/go /usr/local/go
 
@@ -140,6 +115,35 @@ RUN mkdir -p /opt/jdtls /tmp/jdtls-workspace \
     'exec java -Declipse.application=org.eclipse.jdt.ls.core.id1 -Dosgi.bundles.defaultStartLevel=4 -Declipse.product=org.eclipse.jdt.ls.core.product -Dlog.level=ALL -Xmx1G -jar "$LAUNCHER" -configuration /opt/jdtls/config_linux -data /tmp/jdtls-workspace "$@"' \
     > /usr/local/bin/jdtls \
   && chmod +x /usr/local/bin/jdtls
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    python3-numpy \
+    python3-pandas \
+    python3-requests \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libopenblas-dev \
+    liblapack-dev \
+    libeigen3-dev \
+    libgmp-dev \
+    libmpfr-dev \
+    nlohmann-json3-dev \
+    clangd \
+    libgoogle-gson-java \
+    libcommons-lang3-java \
+    libcommons-math3-java \
+    libejml-java \
+    mono-mcs \
+    mono-runtime \
+    docker.io \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY backend/python-requirements.txt ./python-requirements.txt
+
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    -r ./python-requirements.txt \
+    "python-lsp-server[all]"
 
 COPY backend/package*.json ./
 RUN npm install

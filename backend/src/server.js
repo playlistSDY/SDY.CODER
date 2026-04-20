@@ -28,7 +28,6 @@ const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 24 
 
 const SANDBOX_PROVIDER = process.env.SANDBOX_PROVIDER || 'docker';
 const SANDBOX_IMAGE = process.env.SANDBOX_IMAGE || 'web-vscode-backend:latest';
-const SANDBOX_ENABLE_GPU = /^(1|true|yes|on)$/i.test(String(process.env.SANDBOX_ENABLE_GPU || '0'));
 const SANDBOX_CPU_LIMIT = process.env.SANDBOX_CPU_LIMIT || '1.0';
 const SANDBOX_MEMORY_LIMIT = process.env.SANDBOX_MEMORY_LIMIT || '512m';
 const SANDBOX_PIDS_LIMIT = Number(process.env.SANDBOX_PIDS_LIMIT || 128);
@@ -1763,6 +1762,7 @@ function sanitizeRuntimeStderr(language, stderr = '') {
 
   const runtimeNotices = [];
   let tensorflowCpuFallback = false;
+  let tensorflowDriverMismatch = false;
 
   const kept = String(stderr)
     .split('\n')
@@ -1793,7 +1793,39 @@ function sanitizeRuntimeStderr(language, stderr = '') {
         return false;
       }
 
-      if (/^warnings\.warn\($/.test(trimmed)) {
+      if (/^warnings\.warn\(/.test(trimmed)) {
+        return false;
+      }
+
+      if (/^urllib3 \([^)]+\) or chardet \([^)]+\)\/charset_normalizer \([^)]+\) doesn't match a supported version!$/i.test(trimmed)) {
+        return false;
+      }
+
+      if (/^I\d{4} .*cuda_diagnostics\.cc:\d+\] verbose logging is disabled\./.test(trimmed)) {
+        return false;
+      }
+
+      if (/^I\d{4} .*cuda_diagnostics\.cc:\d+\] retrieving CUDA diagnostic information for host: /.test(trimmed)) {
+        return false;
+      }
+
+      if (/^I\d{4} .*cuda_diagnostics\.cc:\d+\] hostname: /.test(trimmed)) {
+        return false;
+      }
+
+      if (/^I\d{4} .*cuda_diagnostics\.cc:\d+\] libcuda reported version is: /.test(trimmed)) {
+        tensorflowCpuFallback = true;
+        return false;
+      }
+
+      if (/^I\d{4} .*cuda_diagnostics\.cc:\d+\] kernel reported version is: /.test(trimmed)) {
+        tensorflowCpuFallback = true;
+        return false;
+      }
+
+      if (/^E\d{4} .*cuda_diagnostics\.cc:\d+\] kernel version .* does not match DSO version .* -- cannot find working devices in this configuration$/.test(trimmed)) {
+        tensorflowCpuFallback = true;
+        tensorflowDriverMismatch = true;
         return false;
       }
 
@@ -1810,6 +1842,12 @@ function sanitizeRuntimeStderr(language, stderr = '') {
   if (tensorflowCpuFallback) {
     runtimeNotices.push(
       'TensorFlow GPU initialization was not available in the sandbox, so TensorFlow ran on CPU for this execution.'
+    );
+  }
+
+  if (tensorflowDriverMismatch) {
+    runtimeNotices.push(
+      'GPU libraries inside the sandbox do not currently match the host NVIDIA driver version, so GPU execution is temporarily unavailable.'
     );
   }
 
@@ -1898,10 +1936,6 @@ async function runInDockerSandbox(language, code, stdinText = '', options = {}) 
     '-c',
     shellCommand
   ];
-
-  if (SANDBOX_ENABLE_GPU) {
-    args.splice(4, 0, '--gpus', 'all');
-  }
 
   let phaseBuffer = '';
   let stderrRelayBuffer = '';
