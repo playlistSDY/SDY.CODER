@@ -137,15 +137,12 @@ numpy
 pandas
 scipy
 sympy
-scikit-learn
-statsmodels
 matplotlib
 seaborn
 networkx
 numba
 pulp
 ortools
-tensorflow
 requests
 ```
 타입 스텁 지원:

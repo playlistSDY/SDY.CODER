@@ -3,22 +3,18 @@ numpy
 pandas
 scipy
 sympy
-scikit-learn
-statsmodels
 matplotlib
 seaborn
 networkx
 numba
 pulp
 ortools
-tensorflow
 
 # Type stubs for basedpyright / pyright where packages are available on PyPI.
 pandas-stubs
 scipy-stubs
 matplotlib-stubs
 types-seaborn
-scikit-learn-stubs
 types-networkx
 pulp-stubs
 ortools-stubs
