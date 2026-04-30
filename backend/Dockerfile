@@ -102,9 +102,7 @@ ENV PATH="/opt/dart-sdk/bin:/opt/kotlinc/bin:/usr/local/go/bin:/usr/share/dotnet
 
 ARG JDTLS_URL=https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz
 RUN mkdir -p /opt/jdtls /tmp/jdtls-workspace \
-  && curl -fsSL "$JDTLS_URL" -o /tmp/jdtls.tar.gz \
-  && tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls \
-  && rm -f /tmp/jdtls.tar.gz \
+  && curl -fsSL "$JDTLS_URL" | tar -xz -C /opt/jdtls \
   && printf '%s\n' \
     '#!/bin/sh' \
     'LAUNCHER=$(ls /opt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar 2>/dev/null | head -n 1)' \
